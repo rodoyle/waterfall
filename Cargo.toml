@@ -1,0 +1,20 @@
+[package]
+name = "waterfall"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rustfft = "6.1.0"       # For CPU FFT computation
+rayon = "1.8.1"         # For parallel processing
+rand = "0.8.5"          # For random data generation in tests
+num-complex = "0.4.4"   # For Complex numbers
+mlx-sys = "0.2.0"       # Low-level interface for Apple MLX
+
+[features]
+mlx = [] # Enable MLX acceleration when this feature is selected
+
+[profile.release]
+lto = true        # Enable Link Time Optimization for release builds
+codegen-units = 1 # Reduce code generation units for better optimization
+panic = 'abort'   # Abort on panic for performance
+strip = true      # Strip symbols for smaller binary size
