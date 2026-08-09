@@ -9,6 +9,13 @@ rayon = "1.8.1"         # For parallel processing
 rand = "0.8.5"          # For random data generation in tests
 num-complex = "0.4.4"   # For Complex numbers
 mlx-sys = "0.2.0"       # Low-level interface for Apple MLX
+# Bridge server (Milestone M1)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = "0.3"
 
 [features]
 mlx = [] # Enable MLX acceleration when this feature is selected

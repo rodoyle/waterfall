@@ -1,9 +1,10 @@
 # MLX STFT Processor — Rust signal back end
 
 **Plan file:** `docs/plans/stft-mlx.md`
-**Status:** Partially implemented. The STFT core + both FFT backends exist in
-`src/lib.rs`; the no-feature build is broken and there is no binary/server/UI
-connection.
+**Status:** Implemented (M1). The STFT core + both FFT backends exist in
+`src/lib.rs`; an incremental `StftProcessor` and `to_db` dBFS conversion were
+added, and `src/main.rs` exposes them through the bridge server. VITA49 consumer
+(real I/Q source) is still to come (M2).
 
 ## Role in the pipeline
 

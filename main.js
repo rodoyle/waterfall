@@ -9,9 +9,11 @@ const config = {
     numRows: 220,          // rows held on screen (time history)
     sweepIntervalMs: 90,   // how often a new sweep arrives
     freqMin: 0,
-    freqMax: 5000,         // Hz (informational axis) - Increased for full bandwidth
+    freqMax: 24000,        // Hz: Nyquist of the 48 kHz STFT source (informational axis)
     intensityMin: -100,    // dB scale (plot properties)
     intensityMax: 0,
+    demo: true,            // use random generation only until real sweeps arrive
+    status: 'offline',     // live | polling | offline (from dataClient)
 };
 
 // Off-screen image we draw each sweep into, then blit onto the canvas with an
@@ -39,18 +41,17 @@ onResize(); // Initial resize
 console.log("Waterfall Plot Visualizer frontend started.");
 
 // Generate one sweep: an array of `numBins` intensity values.
-// Random on-the-fly generation for the demo (per the plan).
+// Random on-the-fly generation; only used while `config.demo` is true (i.e.
+// until the bridge server delivers a real STFT sweep).
 function generateSweep() {
-    console.log("Generating sweep..."); // Log entry point
     const sweep = new Float32Array(config.numBins);
     const center = Math.random() * config.numBins; // moving band
     const width = 20 + Math.random() * 60;
     for (let i = 0; i < config.numBins; i++) {
         // A raised peak on top of noise, so it reads like a signal band.
-        const gaussian = Math.exp(-Math.pow((i - center) / width, 2));
+        const gaussian = Math.exp(-(((i - center) / width) ** 2));
         sweep[i] = gaussian * (70 + Math.random() * 30) + (Math.random() * 18 - 70);
     }
-    console.log("Sweep generated. First few values:", sweep.slice(0, 5)); // Log sample
     return sweep;
 }
 
@@ -141,7 +142,7 @@ function renderPlot() {
     // Time label (x axis).
     ctx.textAlign = 'center';
     ctx.textBaseline = 'top';
-    ctx.fillText(`Time  (sweeps: ${rowOffset}, live)`, padLeft + plotW / 2, padTop + plotH + 10);
+    ctx.fillText(`Time  (sweeps: ${rowOffset}, ${config.status})`, padLeft + plotW / 2, padTop + plotH + 10);
 
     // Color bar: horizontal strip under the plot, gradient left (min) to right (max).
     const barH = 12, barY = padTop + plotH + 28, barPad = 8;
@@ -159,35 +160,42 @@ function renderPlot() {
     ctx.fillText('Intensity', barPad + barW / 2, barY - 6);
 }
 
-// Animation loop: generate + append a sweep, then redraw.
-console.log("Setting up animation interval...");
+// --- Live data client (replaces random generation once a bridge is reachable) ---
+// The bridge stream / general source of sweeps.
+let pendingLive = null;    // freshest live sweep awaiting a clock tick
+function pushLiveSweep(arr) {
+    pendingLive = arr;
+    // Real data present; stop the random demo source.
+    config.demo = false;
+}
+const liveClient = createLiveClient({
+    numBins: config.numBins,
+    onSweep: pushLiveSweep,
+    onStatus: (s) => { config.status = s; },
+});
+
+// Keep the interval as a clock and consume the freshest live frame when one
+// exists; otherwise fall back to generated demo sweeps.
 const animationInterval = setInterval(() => {
-    console.log("Interval tick."); // Log entry point for interval
-    try {
-        const sweep = generateSweep();
-        appendSweep(sweep);
-        renderPlot();
-    } catch (e) {
-        console.error("Error in animation interval:", e);
-        clearInterval(animationInterval); // Stop interval on error
+    let sweep;
+    if (config.demo) {
+        sweep = generateSweep();
+    } else if (pendingLive) {
+        sweep = pendingLive;
+        pendingLive = null;
+    } else {
+        return; // live, but no fresh frame yet — keep the last render
     }
+    appendSweep(sweep);
+    renderPlot();
 }, config.sweepIntervalMs);
 
-// Seed with a few sweeps so the screen isn't empty on load.
-console.log("Seeding initial sweeps...");
+// Seed the screen with silence so real rows fill in from the bottom upward
+// (no random demo junk behind live data).
 for (let i = 0; i < config.numRows; i++) {
-    try {
-        appendSweep(generateSweep());
-    } catch (e) {
-        console.error(`Error seeding sweep ${i}:`, e);
-        // Continue seeding if possible
-    }
+    appendSweep(new Float32Array(config.numBins));
 }
-console.log("Initial seeding complete. Rendering initial plot.");
 renderPlot();
 
-// TODO: Replace random on-the-fly generation with live data:
-// - WebSocket push, or REST `GET /chunks?time=<start>&size=...` polling.
-// - Shape an incoming payload into { bins, intensity[] } where bins = frequency
-//   axis (config.numBins) and intensity[] is the row of dB values fed to
-//   appendSweep().
+// Connect last so the very first delivered sweep lands on a seeded screen.
+liveClient.start();

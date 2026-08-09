@@ -1,7 +1,9 @@
 # Front End — Waterfall Plot Visualizer
 
 **Plan file:** `docs/plans/frontend.md`
-**Status:** Partially implemented — standalone renderer works, no live data path.
+**Status:** Implemented (M1). Standalone renderer works and is now fed live data
+via `dataClient.js` (WebSocket + `/chunks` poll fallback); the demo
+`generateSweep()` is gated behind `config.demo` until the bridge delivers a row.
 
 ## What exists today (grounded in `main.js`, `index.html`)
 
