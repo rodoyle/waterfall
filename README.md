@@ -58,4 +58,7 @@ bin/check_mlx.sh         # verify the MLX build environment
 
 Vanilla JS + HTML5 Canvas (no React). `dataClient.js` connects the WebSocket,
 falls back to `/chunks` polling, and feeds normalized sweeps to `main.js`, whose
-renderer (`appendSweep`/`renderPlot`) is unchanged from its standalone form.
+renderer (`appendSweep`/`renderPlot`) is unchanged from its standalone form. A
+lightweight controls panel (top-right, collapsible) exposes bin-count, rows,
+sweep interval, dB range, linear/log frequency axis, and run/pause — all bound
+to the existing `config` object, no framework.

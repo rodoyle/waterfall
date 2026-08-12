@@ -1,9 +1,12 @@
 # Front End — Waterfall Plot Visualizer
 
 **Plan file:** `docs/plans/frontend.md`
-**Status:** Implemented (M1). Standalone renderer works and is now fed live data
+**Status:** Implemented (M1 + controls). Standalone renderer works and is now fed live data
 via `dataClient.js` (WebSocket + `/chunks` poll fallback); the demo
 `generateSweep()` is gated behind `config.demo` until the bridge delivers a row.
+A lightweight controls panel (bin-count, rows, sweep interval, dB range,
+linear/log frequency axis, run/pause) is wired into `index.html` + `main.js`,
+reusing the existing `config` object with no framework.
 
 ## What exists today (grounded in `main.js`, `index.html`)
 

@@ -12,6 +12,8 @@ const config = {
     freqMax: 24000,        // Hz: Nyquist of the 48 kHz STFT source (informational axis)
     intensityMin: -100,    // dB scale (plot properties)
     intensityMax: 0,
+    freqScale: 'linear',   // frequency-axis label mapping: 'linear' | 'log'
+    paused: false,         // run/pause toggle for the animation clock
     demo: true,            // use random generation only until real sweeps arrive
     status: 'offline',     // live | polling | offline (from dataClient)
 };
@@ -128,15 +130,27 @@ function renderPlot() {
     ctx.lineWidth = 1;
     ctx.strokeRect(padLeft, padTop, plotW, plotH);
 
-    // Frequency labels (y axis).
+    // Frequency labels (y axis). Linear spacing by default; log spacing places
+    // labels at decade/octave-ish fractions of the axis so a log-scale SDR view
+    // still reads correctly (plan step 3: linear/log frequency axis scale).
     ctx.fillStyle = '#222';
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
+    const fLo = Math.max(1, config.freqMin); // log(0) is -inf; clamp floor
+    const fHi = Math.max(fLo + 1, config.freqMax);
     for (let i = 0; i <= 4; i++) {
-        const f = config.freqMin + (config.freqMax - config.freqMin) * i / 4;
+        let f;
+        if (config.freqScale === 'log') {
+            // log-space between fLo and fHi
+            const t = i / 4;
+            f = fLo * (fHi / fLo) ** t;
+            if (i === 0) f = config.freqMin; // anchor the bottom edge exactly
+        } else {
+            f = config.freqMin + (config.freqMax - config.freqMin) * i / 4;
+        }
         const y = padTop + plotH - (plotH * i / 4);
-        ctx.fillText(`${f} Hz`, padLeft - 8, y);
+        ctx.fillText(`${f.toFixed(f >= 1000 ? 0 : 1)} Hz`, padLeft - 8, y);
     }
 
     // Time label (x axis).
@@ -168,15 +182,16 @@ function pushLiveSweep(arr) {
     // Real data present; stop the random demo source.
     config.demo = false;
 }
-const liveClient = createLiveClient({
+let liveClient = createLiveClient({
     numBins: config.numBins,
     onSweep: pushLiveSweep,
     onStatus: (s) => { config.status = s; },
 });
 
+// --- Animation clock (run/pause + sweep-rate aware) ---
 // Keep the interval as a clock and consume the freshest live frame when one
 // exists; otherwise fall back to generated demo sweeps.
-const animationInterval = setInterval(() => {
+function tick() {
     let sweep;
     if (config.demo) {
         sweep = generateSweep();
@@ -188,7 +203,107 @@ const animationInterval = setInterval(() => {
     }
     appendSweep(sweep);
     renderPlot();
-}, config.sweepIntervalMs);
+}
+
+let animationInterval = null;
+function startClock() {
+    stopClock();
+    animationInterval = setInterval(tick, config.sweepIntervalMs);
+    config.paused = false;
+}
+function stopClock() {
+    if (animationInterval !== null) {
+        clearInterval(animationInterval);
+        animationInterval = null;
+    }
+    config.paused = true;
+}
+
+// (Re)apply geometry: resize the off-screen plotCanvas and re-seed it with
+// silence so live rows fill in cleanly after a bin/row-count change.
+function applyGeometry() {
+    plotCanvas.width = config.numBins;
+    plotCanvas.height = config.numRows;
+    rowOffset = 0;
+    for (let i = 0; i < config.numRows; i++) {
+        appendSweep(new Float32Array(config.numBins));
+    }
+    // The live client downsamples server bins to `numBins`; recreate it so the
+    // new width takes effect for incoming sweeps.
+    try { liveClient.close(); } catch (_) {}
+    liveClient = createLiveClient({
+        numBins: config.numBins,
+        onSweep: pushLiveSweep,
+        onStatus: (s) => { config.status = s; },
+    });
+    liveClient.start();
+    renderPlot();
+}
+
+// --- Controls panel (plan step 3) ---
+// Lightweight: read the DOM inputs into `config`, then apply only the side
+// effects each change requires. No framework, reuses the existing config object.
+function wireControls() {
+    const $ = (id) => document.getElementById(id);
+    const panel = $('controls');
+    const toggle = $('controlsToggle');
+    toggle.addEventListener('click', () => panel.classList.toggle('collapsed'));
+
+    const numBinsInput = $('ctlNumBins');
+    const numRowsInput = $('ctlNumRows');
+    const sweepMsInput = $('ctlSweepMs');
+    const dbMinInput = $('ctlDbMin');
+    const dbMaxInput = $('ctlDbMax');
+    const freqScaleSelect = $('ctlFreqScale');
+    const runPauseBtn = $('ctlRunPause');
+
+    function syncRunPauseBtn() {
+        runPauseBtn.textContent = config.paused ? 'Run' : 'Pause';
+        runPauseBtn.classList.toggle('running', !config.paused);
+    }
+
+    numBinsInput.addEventListener('change', () => {
+        const v = Math.max(16, Math.min(4096, parseInt(numBinsInput.value, 10) | 0));
+        numBinsInput.value = v;
+        config.numBins = v;
+        applyGeometry();
+    });
+    numRowsInput.addEventListener('change', () => {
+        const v = Math.max(16, Math.min(2000, parseInt(numRowsInput.value, 10) | 0));
+        numRowsInput.value = v;
+        config.numRows = v;
+        applyGeometry();
+    });
+    sweepMsInput.addEventListener('change', () => {
+        const v = Math.max(10, Math.min(2000, parseInt(sweepMsInput.value, 10) | 0));
+        sweepMsInput.value = v;
+        config.sweepIntervalMs = v;
+        if (!config.paused) startClock(); // restart interval at the new cadence
+    });
+    dbMinInput.addEventListener('change', () => {
+        const v = Math.max(-160, Math.min(0, parseInt(dbMinInput.value, 10) | 0));
+        dbMinInput.value = v;
+        config.intensityMin = v;
+        renderPlot();
+    });
+    dbMaxInput.addEventListener('change', () => {
+        const v = Math.max(-160, Math.min(0, parseInt(dbMaxInput.value, 10) | 0));
+        dbMaxInput.value = v;
+        config.intensityMax = v;
+        renderPlot();
+    });
+    freqScaleSelect.addEventListener('change', () => {
+        config.freqScale = freqScaleSelect.value === 'log' ? 'log' : 'linear';
+        renderPlot();
+    });
+    runPauseBtn.addEventListener('click', () => {
+        if (config.paused) startClock();
+        else stopClock();
+        syncRunPauseBtn();
+    });
+
+    syncRunPauseBtn();
+}
 
 // Seed the screen with silence so real rows fill in from the bottom upward
 // (no random demo junk behind live data).
@@ -199,3 +314,5 @@ renderPlot();
 
 // Connect last so the very first delivered sweep lands on a seeded screen.
 liveClient.start();
+startClock();
+wireControls();
