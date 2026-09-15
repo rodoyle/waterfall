@@ -1,0 +1,7 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://waterfall.local/schemas/palantir-response.v1.json",
+  "title":"PalantirResponseV1",
+  "type":"object","required":["version","prompt","items"],
+  "properties":{"version":{"const":"palantir.v1"},"prompt":{"type":"string"},"items":{"type":"array","items":{"type":"object","required":["kind","caption"],"properties":{"kind":{"enum":["image","video","video-frame","raster-text"]},"src":{"type":"string"},"caption":{"type":"string"},"effect":{"type":"string"}}}}}
+}

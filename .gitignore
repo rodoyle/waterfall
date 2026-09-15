@@ -36,3 +36,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # pi coding harness session metadata
 .pi-glla/
+palantir-smoke.png
+
+# dev screenshots
+palantir-composited.png
+palantir-clarity.png
+palantir-visions.png
+.pi/

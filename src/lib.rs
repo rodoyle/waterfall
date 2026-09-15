@@ -22,7 +22,7 @@ pub const FFT_SIZE: usize = 4096;
 pub const HOP_SIZE: usize = 1024; // 75% overlap: (4096-1024)/4096
 
 // ---------------- MLX (Apple GPU / Metal) backend ----------------
-#[cfg(feature = "mlx")]
+#[cfg(all(feature = "mlx", target_os = "macos"))]
 mod mlx_integration {
     use mlx_sys as m;
     use num_complex::Complex;
@@ -153,14 +153,14 @@ fn plan_cpu_fft(n: usize) -> std::sync::Arc<dyn rustfft::Fft<f32> + Send + Sync>
 /// A unified forward-FFT over the selected backend (CPU / MLX).
 enum FftBackend {
     Cpu(std::sync::Arc<dyn rustfft::Fft<f32> + Send + Sync>),
-    #[cfg(feature = "mlx")]
+    #[cfg(all(feature = "mlx", target_os = "macos"))]
     Mlx(mlx_integration::MlxFft),
 }
 
 // SAFETY: both variants are shareable across rayon threads.
 unsafe impl Sync for FftBackend {}
 
-#[cfg(feature = "mlx")]
+#[cfg(all(feature = "mlx", target_os = "macos"))]
 impl FftBackend {
     fn plan(n: usize) -> FftBackend {
         match mlx_integration::plan_fft_forward(n) {
@@ -173,14 +173,14 @@ impl FftBackend {
     }
 }
 
-#[cfg(not(feature = "mlx"))]
+#[cfg(any(not(feature = "mlx"), not(target_os = "macos")))]
 impl FftBackend {
     fn plan(n: usize) -> FftBackend {
         FftBackend::Cpu(plan_cpu_fft(n))
     }
 }
 
-#[cfg(feature = "mlx")]
+#[cfg(all(feature = "mlx", target_os = "macos"))]
 impl FftBackend {
     /// Run the forward FFT, dispatching to MLX when the backend is MLX.
     fn process(&self, buffer: &mut [Complex<f32>]) -> Result<(), String> {
@@ -194,7 +194,7 @@ impl FftBackend {
     }
 }
 
-#[cfg(not(feature = "mlx"))]
+#[cfg(any(not(feature = "mlx"), not(target_os = "macos")))]
 impl FftBackend {
     /// Run the forward FFT on the CPU backend.
     fn process(&self, buffer: &mut [Complex<f32>]) -> Result<(), String> {
@@ -510,7 +510,11 @@ mod tests {
         let mut bins = vec![Complex::new(0.0, 0.0); n];
         bins[17] = Complex::new(127.0 * n as f32, 0.0);
         let db = to_db(&bins);
-        assert!((db[17].abs()) < 1e-3, "full-scale bin should read ~0, got {}", db[17]);
+        assert!(
+            (db[17].abs()) < 1e-3,
+            "full-scale bin should read ~0, got {}",
+            db[17]
+        );
         assert!(db.iter().filter(|v| **v < -90.0).count() >= n - 1);
     }
 
@@ -539,10 +543,7 @@ mod tests {
 
         // Reference: batch path.
         let raw = stft(&bytes);
-        let expected_frames: Vec<Vec<f32>> = raw
-            .chunks_exact(FFT_SIZE)
-            .map(|f| to_db(f))
-            .collect();
+        let expected_frames: Vec<Vec<f32>> = raw.chunks_exact(FFT_SIZE).map(|f| to_db(f)).collect();
 
         // Incremental: split the byte stream into odd-sized chunks so the
         // carry-over boundary falls mid-frame.
@@ -601,10 +602,15 @@ mod tests {
         let peak_bin = (start..end)
             .max_by(|a, b| first[*a].partial_cmp(&first[*b]).unwrap())
             .unwrap();
-        assert!(peak_bin >= start && peak_bin < end, "peak {peak_bin} outside [{start},{end})");
+        assert!(
+            peak_bin >= start && peak_bin < end,
+            "peak {peak_bin} outside [{start},{end})"
+        );
         // Tone should read near 0 dBFS (amplitude 100 -> ~ -2 dB).
-        assert!(first[peak_bin] > -5.0 && first[peak_bin] <= 0.0, "got {}", first[peak_bin]);
+        assert!(
+            first[peak_bin] > -5.0 && first[peak_bin] <= 0.0,
+            "got {}",
+            first[peak_bin]
+        );
     }
 }
-
-

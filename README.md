@@ -54,6 +54,10 @@ cargo test --features mlx  # optional Apple MLX backend
 bin/check_mlx.sh         # verify the MLX build environment
 ```
 
+## Palantir prototype
+
+Open `http://127.0.0.1:4780/palantir.html` after starting the bridge server to try the second frontend view. It is a vanilla WebGL prototype: submit a plain-text question, watch the mist resolve, and use Reset to replay. The mock adapter in `palantir.js` follows `docs/palantir-response.schema.json` (`palantir.v1`), whose ordered items support `image`, `video`, `video-frame`, and `raster-text` entries with `src`, `caption`, and optional `effect`. Replace `mock()` with the backend fetch when the response endpoint is available.
+
 ## Front end
 
 Vanilla JS + HTML5 Canvas (no React). `dataClient.js` connects the WebSocket,
