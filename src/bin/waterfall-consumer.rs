@@ -33,6 +33,7 @@ use tokio::sync::mpsc;
 use waterfall::cli;
 use waterfall::consumer::PacketProcessor;
 use waterfall::publish::{IngestMeta, IngestRequest, RowBatch, RowDto};
+use waterfall::shutdown;
 use waterfall::vita49::{self, GapTracker, ParseError, NOMINAL_COMPLEX_SAMPLES};
 
 /// Max UDP datagram we will read (datagrams are 8202-8212 bytes today).
@@ -686,7 +687,10 @@ async fn main() {
         cfg.stats_listen
     );
 
+    // Graceful shutdown so a rollout exits zero instead of panicking the serve
+    // loop and showing up as an `Error` pod (see waterfall::shutdown).
     axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown::signal())
         .await
         .expect("stats server error");
 }

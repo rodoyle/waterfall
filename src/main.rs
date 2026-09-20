@@ -25,7 +25,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query, State,
+        DefaultBodyLimit, Query, State,
     },
     http::StatusCode,
     response::{IntoResponse, Json},
@@ -44,12 +44,21 @@ use std::{
 use tower_http::services::ServeDir;
 use waterfall::cli;
 use waterfall::publish::IngestRequest;
+use waterfall::shutdown;
 use waterfall::{complex_vec_to_bytes, StftProcessor, HOP_SIZE};
 
 /// Default sample rate of the synthetic source. Bins 0..N map to 0..SR Hz.
 const SAMPLE_RATE: f32 = 48_000.0;
 /// Max rows retained for `/chunks` (~8 MB at 4096 bins/row).
 const MAX_CHUNKS: usize = 512;
+/// Max body accepted by `POST /ingest`.
+///
+/// A row is 4096 `f32` rendered as JSON (~65 KB in decimal text) and the
+/// consumer batches up to 64 of them, so axum's 2 MB default rejected real
+/// traffic with `HTTP 413 Payload Too Large` on the live stream. 16 MB leaves
+/// ample headroom for that batching policy (this endpoint is cluster-internal
+/// and fed only by waterfall-consumer).
+const INGEST_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 /// A feed with no row for this long is reported as stale.
 const STALE_AFTER: Duration = Duration::from_secs(3);
 
@@ -188,7 +197,10 @@ fn app(state: Arc<AppState>, static_dir: &str) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/chunks", get(chunks_handler))
-        .route("/ingest", post(ingest_handler))
+        .route(
+            "/ingest",
+            post(ingest_handler).layer(DefaultBodyLimit::max(INGEST_BODY_LIMIT_BYTES)),
+        )
         .route("/meta", get(meta_handler))
         .route("/stats", get(stats_handler))
         .fallback_service(ServeDir::new(static_dir))
@@ -429,5 +441,11 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .expect("bind failed");
-    axum::serve(listener, router).await.expect("server error");
+    // Graceful shutdown: a rollout must not panic the serve loop and leave an
+    // `Error` pod behind (see waterfall::shutdown).
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown::signal())
+        .await
+        .expect("server error");
+    println!("waterfall bridge: shut down cleanly");
 }

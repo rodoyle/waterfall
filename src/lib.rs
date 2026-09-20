@@ -31,6 +31,9 @@ pub mod consumer;
 /// Flag parsing shared by both binaries (`--flag value` and `--flag=value`).
 pub mod cli;
 
+/// Graceful shutdown signalling shared by both servers.
+pub mod shutdown;
+
 // Constants derived from the spec.
 pub const FFT_SIZE: usize = 4096;
 pub const HOP_SIZE: usize = 1024; // 75% overlap: (4096-1024)/4096
