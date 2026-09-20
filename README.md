@@ -32,9 +32,18 @@ See `docs/plans/` for the master plan (`overview.md`) and per-component plans.
   16-bit resolution** (`StftProcessor::push_sc16`, dBFS referenced to 32767)
   because the live 915 MHz band peaks at `|sc16| = 46` — an 8-bit `>> 8`
   downshift would collapse it to `{0, -1}` with a DC bias and flatten the
-  waterfall. The 8-bit path is retained and tested. See
-  `docs/plans/vita49-consumer.md` for the corrected assumptions and
-  `deploy/README.md` for the apply order.
+  waterfall. The 8-bit path is retained and tested.
+
+  Display pipeline facts, each fixed against live data (see the commits):
+  `Row::bins` is in **natural frequency order** (−fs/2 … +fs/2, DC at n/2) so
+  the absolute axis is correct; the dB clamp is now **−140** (a −100 floor put
+  3099/4096 live bins on the floor and flattened the plot); the colour range
+  **auto-fits** to the rows on screen until the user touches the dB controls;
+  and the renderer labels **frequency along the bottom and time up the left**
+  (a sweep is one pixel row across X, so those labels were previously swapped).
+
+  See `docs/plans/vita49-consumer.md` for the corrected wire-format assumptions
+  and `deploy/README.md` for the apply order and operational notes.
 - **M3 / M4** (RF collector, end-to-end hardening) — not started.
 
 ## Run the waterfall
