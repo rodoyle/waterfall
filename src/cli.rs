@@ -96,14 +96,25 @@ mod tests {
 
     #[test]
     fn missing_flag_is_none_and_parse_or_uses_the_default() {
-        assert_eq!(flag_value(&args(&["bin", "--static", "."]), "--source"), None);
+        assert_eq!(
+            flag_value(&args(&["bin", "--static", "."]), "--source"),
+            None
+        );
         assert_eq!(parse_or(&args(&["bin"]), "--publish-hz", 30.0_f64), 30.0);
         assert_eq!(
-            parse_or(&args(&["bin", "--publish-hz=12.5"]), "--publish-hz", 30.0_f64),
+            parse_or(
+                &args(&["bin", "--publish-hz=12.5"]),
+                "--publish-hz",
+                30.0_f64
+            ),
             12.5
         );
         assert_eq!(
-            parse_or(&args(&["bin", "--publish-hz", "7"]), "--publish-hz", 30.0_f64),
+            parse_or(
+                &args(&["bin", "--publish-hz", "7"]),
+                "--publish-hz",
+                30.0_f64
+            ),
             7.0
         );
     }
@@ -111,7 +122,10 @@ mod tests {
     #[test]
     fn first_occurrence_wins() {
         assert_eq!(
-            flag_value(&args(&["bin", "--source=ingest", "--source", "synthetic"]), "--source"),
+            flag_value(
+                &args(&["bin", "--source=ingest", "--source", "synthetic"]),
+                "--source"
+            ),
             Some("ingest".to_string())
         );
     }

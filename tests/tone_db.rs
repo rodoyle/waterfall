@@ -96,18 +96,16 @@ fn tone_index(passband_bin: usize) -> usize {
 
 /// Peak (bin index, dBFS) across the row.
 fn peak(bins: &[f32]) -> (usize, f32) {
-    bins.iter()
-        .enumerate()
-        .fold(
-            (0usize, f32::MIN),
-            |acc, (i, &v)| {
-                if v > acc.1 {
-                    (i, v)
-                } else {
-                    acc
-                }
-            },
-        )
+    bins.iter().enumerate().fold(
+        (0usize, f32::MIN),
+        |acc, (i, &v)| {
+            if v > acc.1 {
+                (i, v)
+            } else {
+                acc
+            }
+        },
+    )
 }
 
 /// Second-highest bin, used to prove the energy really is concentrated.
@@ -155,7 +153,11 @@ fn a_tone_lands_on_its_expected_bin_at_its_expected_dbfs() {
     assert_eq!(row.bins.len(), FFT_SIZE);
 
     let (bin, dbfs) = peak(&row.bins);
-    assert_eq!(bin, tone_index(TONE_BIN), "tone bin: +512 -> +250 kHz at 2 MS/s");
+    assert_eq!(
+        bin,
+        tone_index(TONE_BIN),
+        "tone bin: +512 -> +250 kHz at 2 MS/s"
+    );
     assert!(
         (dbfs - EXPECTED_DBFS).abs() <= DBFS_TOLERANCE,
         "expected ~{EXPECTED_DBFS} dBFS for amplitude 64 of 127 full scale, got {dbfs}"
@@ -297,7 +299,10 @@ fn real_captured_sigproc_datagram_parses() {
     assert_eq!(packet.header.tsf, 1, "fraction in sample counts");
     assert_eq!(packet.header.packet_count, 0, "not populated by the sender");
     assert_eq!(packet.header.size_words, 2052);
-    assert!(packet.size_field_matches, "declared size == delivered length");
+    assert!(
+        packet.size_field_matches,
+        "declared size == delivered length"
+    );
     assert_eq!(packet.stream_id, 0, "always 0 today");
     assert_eq!(packet.complex_samples(), NOMINAL_COMPLEX_SAMPLES);
     assert_eq!(packet.trailing_bytes, 0);
@@ -307,7 +312,11 @@ fn real_captured_sigproc_datagram_parses() {
 
     // Genuine RF: many distinct values, mostly non-zero.
     let distinct: std::collections::HashSet<i16> = components.iter().copied().collect();
-    assert!(distinct.len() > 20, "real noise floor, {} distinct", distinct.len());
+    assert!(
+        distinct.len() > 20,
+        "real noise floor, {} distinct",
+        distinct.len()
+    );
     let non_zero = components.iter().filter(|&&v| v != 0).count();
     assert!(non_zero * 10 > components.len() * 9, ">90% non-zero");
 
@@ -329,7 +338,10 @@ fn real_captured_sigproc_datagram_parses() {
     let mut processor = PacketProcessor::new(NOMINAL_SAMPLE_RATE);
     let mut rows = processor.observe(datagram).rows;
     rows.extend(processor.observe(datagram).rows);
-    assert!(!rows.is_empty(), "two live datagrams fill a 4096-sample window");
+    assert!(
+        !rows.is_empty(),
+        "two live datagrams fill a 4096-sample window"
+    );
     let row = &rows[rows.len() - 1];
     assert_eq!(row.bins.len(), FFT_SIZE);
     let spread = row.bins.iter().cloned().fold(f32::MIN, f32::max)
@@ -338,8 +350,16 @@ fn real_captured_sigproc_datagram_parses() {
         spread > 5.0,
         "live spectrum has structure at 16-bit resolution (spread {spread:.1} dB)"
     );
-    assert_eq!(processor.peak_abs(), peak, "processor reports the live level");
-    assert!(processor.mean_abs() > 1.0, "mean level {}", processor.mean_abs());
+    assert_eq!(
+        processor.peak_abs(),
+        peak,
+        "processor reports the live level"
+    );
+    assert!(
+        processor.mean_abs() > 1.0,
+        "mean level {}",
+        processor.mean_abs()
+    );
 }
 
 /// The 8-bit downshift is only lossless for full-scale input. On this live band
@@ -401,7 +421,11 @@ fn quiet_tones_keep_their_bin_and_level_on_the_sc16_path() {
     let row = row_from(&mut processor, &over_udp(&packets));
 
     let (bin, dbfs) = peak(&row.bins);
-    assert_eq!(bin, tone_index(TONE_BIN), "quiet tone still lands on its bin");
+    assert_eq!(
+        bin,
+        tone_index(TONE_BIN),
+        "quiet tone still lands on its bin"
+    );
 
     // 20*log10(46 / 32767) = -57.06 dBFS against the 16-bit reference.
     let expected = 20.0 * (QUIET_SC16 as f32 / 32767.0).log10();
