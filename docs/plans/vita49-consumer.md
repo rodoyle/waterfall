@@ -1,8 +1,33 @@
 # VITA49 Consumer — Rust UDP → 8-bit I/Q
 
 **Plan file:** `docs/plans/vita49-consumer.md`
-**Status:** Not started — the UDP socket + VITA49 parser do not exist. The first
-built half of the signal-processing back end.
+**Status:** In progress (M2). The VITA49 parser, consumer, and bridge are
+implemented; the bridge now runs the live RF path. See `src/vita49.rs`,
+`src/consumer.rs`, `src/publish.rs`, `src/bin/waterfall-consumer.rs`, and the
+tone/dBFS integration test in `tests/tone_db.rs`.
+
+> **Corrections (2026-09-20):** several assumptions below were wrong for the
+> live sender. The authoritative wire format was verified against
+> `sigproc/src/vita49.rs`; the corrections are in this section and the code is
+> the source of truth where they disagree with the rest of the file.
+>
+> - Payload is **sc16** (signed 16-bit interleaved I/Q), **not 8-bit**. The
+>   consumer converts each component with `sample >> 8` to the i8 the STFT
+>   expects, preserving the 127 full-scale reference `to_db` calibrates against.
+> - **One packet per UDP datagram**, not multiple. Size the parser from the
+>   datagram length, never assume 8212.
+> - **No context packets, ever.** Sample rate (2 MS/s), bit depth (sc16) and
+>   scaling are not on the wire; take them from the sigproc ConfigMap or make
+>   them consumer config.
+> - **`stream_id` is always 0 and `packet_count` is always 0** (known sender
+>   bugs, recorded, not fixed). Do not dispatch on stream id or wait for a
+>   sequence number; the unwrapped sample counter is the only loss signal.
+> - A full 2048-sample packet is **8212 bytes**, 4-byte aligned, with header
+>   `0x10D00804` (packet type 0x1, TSI 3 free-running, TSF 1 sample-count, size
+>   field 2052 = total words − 1). The pre-fix sender produced a malformed
+>   8202-byte datagram that panicked on the first send; the parser tolerates
+>   that legacy layout (size-field-mismatch flag, length wins) so a mixed
+>   fleet cannot drop packets.
 
 ## Role in the pipeline
 

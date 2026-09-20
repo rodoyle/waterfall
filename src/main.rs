@@ -1,24 +1,35 @@
-// src/main.rs — Waterfall bridge server (Milestone M1).
+// src/main.rs — Waterfall bridge server (web tier).
 //
-// A single Rust binary that owns the STFT processor and serves the front end:
+// Serves the front end and fans out spectrogram rows from whichever producer is
+// configured:
 //
-//   * `GET /ws`    — WebSocket push of `{type:"sweep", bins, samples, intensity[]}`
-//                    dBFS rows as they are produced by the STFT.
-//   * `GET /chunks?time=<start>&size=<n>` — REST fallback returning the last
-//                    rows in ascending time order (the front end polls this when
-//                    the WebSocket is unavailable).
-//   * fallback      — static files (index.html, main.js, dataClient.js).
+//   * `GET  /ws`      — WebSocket push of `{type:"sweep", bins, samples, intensity[]}`
+//                       dBFS rows as they arrive.
+//   * `GET  /chunks?time=<start>&size=<n>` — REST fallback returning the last
+//                       rows in ascending time order (the front end polls this
+//                       when the WebSocket is unavailable).
+//   * `POST /ingest`  — row batches from `waterfall-consumer` (the middleware
+//                       tier). This is the deployed data path.
+//   * `GET  /meta`    — RF metadata for the front end: centre frequency, sample
+//                       rate, producer, freshness, and the consumer's loss
+//                       counters. Drives the absolute MHz frequency axis.
+//   * `GET  /stats`   — ingest counters for operators and verification.
+//   * fallback        — static files (index.html, main.js, dataClient.js).
 //
-// Until the VITA49 consumer exists (Milestone M2), the STFT is fed by a
-// background *synthetic* I/Q generator so the front end shows live, real
-// STFT-processed data instead of random on-the-fly sweeps. When M2 lands, the
-// consumer feeds the same `waterfall::StftProcessor` and only this generator
-// changes.
+// `--source synthetic|ingest` selects the producer. `synthetic` (the default)
+// keeps the M1 local development loop working with no cluster and no RF. The
+// deployed Deployment runs `--source ingest`, where there is deliberately NO
+// synthetic fallback: if the RF feed stops, `/meta` reports stale and the rows
+// stop, because fabricated rows look exactly like real signal on a waterfall.
 
 use axum::{
-    extract::{ws::{Message, WebSocket, WebSocketUpgrade}, Query, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Query, State,
+    },
+    http::StatusCode,
     response::{IntoResponse, Json},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use num_complex::Complex;
@@ -28,15 +39,18 @@ use std::{
     collections::VecDeque,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tower_http::services::ServeDir;
+use waterfall::publish::IngestRequest;
 use waterfall::{complex_vec_to_bytes, StftProcessor, HOP_SIZE};
 
 /// Default sample rate of the synthetic source. Bins 0..N map to 0..SR Hz.
 const SAMPLE_RATE: f32 = 48_000.0;
-/// Max rows retained for `/chunks`.
+/// Max rows retained for `/chunks` (~8 MB at 4096 bins/row).
 const MAX_CHUNKS: usize = 512;
+/// A feed with no row for this long is reported as stale.
+const STALE_AFTER: Duration = Duration::from_secs(3);
 
 /// One spectrogram row served to the front end.
 #[derive(Clone, Serialize)]
@@ -59,10 +73,28 @@ impl SweepEntry {
     }
 }
 
-/// Shared server state: fan-out channel + bounded history ring.
+/// Producer state: what fed the ring, and how fresh it is.
+#[derive(Debug, Default)]
+struct ProducerMeta {
+    /// Which producer last delivered a row: "synthetic" or "vita49".
+    source: String,
+    center_hz: f64,
+    sample_rate_hz: f64,
+    last_row_at: Option<SystemTime>,
+    rows_ingested: u64,
+    batches_ingested: u64,
+    bins: usize,
+    /// Latest loss/health report from the middleware tier.
+    consumer: Option<waterfall::publish::IngestMeta>,
+}
+
+/// Shared server state: fan-out channel, bounded history ring, producer state.
 struct AppState {
     tx: tokio::sync::broadcast::Sender<SweepEntry>,
     ring: Mutex<VecDeque<SweepEntry>>,
+    producer: Mutex<ProducerMeta>,
+    /// Producer selected at startup (`synthetic` or `ingest`).
+    configured_source: &'static str,
 }
 
 #[derive(Deserialize)]
@@ -71,18 +103,165 @@ struct ChunksQuery {
     size: Option<usize>,
 }
 
+/// Served by `GET /meta`: everything the front end needs to label the plot.
+#[derive(Serialize)]
+struct MetaResponse {
+    /// Producer that last delivered rows.
+    source: String,
+    /// Producer this bridge was started with.
+    configured_source: &'static str,
+    center_hz: f64,
+    sample_rate_hz: f64,
+    /// Bins per row (0 until the first row arrives).
+    bins: usize,
+    /// Milliseconds since the last row, if any.
+    stale_ms: Option<u128>,
+    /// True when nothing has arrived for `STALE_AFTER`.
+    stale: bool,
+    rows_ingested: u64,
+    batches_ingested: u64,
+    ring_len: usize,
+    consumer: Option<waterfall::publish::IngestMeta>,
+}
+
+/// Served by `GET /stats`.
+#[derive(Serialize)]
+struct StatsResponse {
+    source: String,
+    configured_source: &'static str,
+    rows_ingested: u64,
+    batches_ingested: u64,
+    ring_len: usize,
+    ring_capacity: usize,
+    subscribers: usize,
+    stale: bool,
+    consumer: Option<waterfall::publish::IngestMeta>,
+}
+
+#[derive(Serialize)]
+struct IngestAck {
+    accepted: usize,
+    ring_len: usize,
+}
+
+fn source_meta(state: &AppState) -> (String, f64, f64, usize, Option<u128>, bool, u64, u64, Option<waterfall::publish::IngestMeta>) {
+    let p = state.producer.lock().unwrap();
+    let stale_ms = p.last_row_at.and_then(|t| {
+        SystemTime::now()
+            .duration_since(t)
+            .ok()
+            .map(|d| d.as_millis())
+    });
+    let stale = match stale_ms {
+        Some(ms) => ms > STALE_AFTER.as_millis(),
+        None => true,
+    };
+    (
+        p.source.clone(),
+        p.center_hz,
+        p.sample_rate_hz,
+        p.bins,
+        stale_ms,
+        stale,
+        p.rows_ingested,
+        p.batches_ingested,
+        p.consumer.clone(),
+    )
+}
+
 // ---------------- Routing ----------------
 
 fn app(state: Arc<AppState>, static_dir: &str) -> Router {
     Router::new()
         .route("/ws", get(ws_handler))
         .route("/chunks", get(chunks_handler))
+        .route("/ingest", post(ingest_handler))
+        .route("/meta", get(meta_handler))
+        .route("/stats", get(stats_handler))
         .fallback_service(ServeDir::new(static_dir))
         .with_state(state)
 }
 
-/// WebSocket: stream every STFT row as it is produced. No backpressure beyond
-/// the broadcast buffer — a slow client just misses frames, which is fine for a
+/// Accept a batch of rows from the middleware tier and fan it out.
+///
+/// Returns 202 immediately: the consumer must never wait on the web tier.
+async fn ingest_handler(
+    State(st): State<Arc<AppState>>,
+    Json(request): Json<IngestRequest>,
+) -> impl IntoResponse {
+    let accepted = request.rows.len();
+
+    {
+        let mut p = st.producer.lock().unwrap();
+        p.source = request.meta.source.clone();
+        p.center_hz = request.meta.center_hz;
+        p.sample_rate_hz = request.meta.sample_rate_hz;
+        p.last_row_at = Some(SystemTime::now());
+        p.rows_ingested += accepted as u64;
+        p.batches_ingested += 1;
+        p.consumer = Some(request.meta);
+    }
+
+    let mut ring = st.ring.lock().unwrap();
+    for row in request.rows {
+        let entry = SweepEntry {
+            kind: "sweep",
+            bins: row.bins.len(),
+            samples: row.sample,
+            intensity: row.bins,
+        };
+        {
+            let mut p = st.producer.lock().unwrap();
+            p.bins = entry.bins;
+        }
+        let _ = st.tx.send(entry.clone()); // ignore "no subscribers"
+        ring.push_back(entry);
+        while ring.len() > MAX_CHUNKS {
+            ring.pop_front();
+        }
+    }
+    let ring_len = ring.len();
+    drop(ring);
+
+    (StatusCode::ACCEPTED, Json(IngestAck { accepted, ring_len }))
+}
+
+/// RF metadata for the front end's frequency axis, with freshness and loss.
+async fn meta_handler(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let (source, center_hz, sample_rate_hz, bins, stale_ms, stale, rows, batches, consumer) =
+        source_meta(&st);
+    Json(MetaResponse {
+        source,
+        configured_source: st.configured_source,
+        center_hz,
+        sample_rate_hz,
+        bins,
+        stale_ms,
+        stale,
+        rows_ingested: rows,
+        batches_ingested: batches,
+        ring_len: st.ring.lock().unwrap().len(),
+        consumer,
+    })
+}
+
+async fn stats_handler(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let (source, _c, _s, _b, _ms, stale, rows, batches, consumer) = source_meta(&st);
+    Json(StatsResponse {
+        source,
+        configured_source: st.configured_source,
+        rows_ingested: rows,
+        batches_ingested: batches,
+        ring_len: st.ring.lock().unwrap().len(),
+        ring_capacity: MAX_CHUNKS,
+        subscribers: st.tx.receiver_count(),
+        stale,
+        consumer,
+    })
+}
+
+/// WebSocket: stream every row as it is produced. No backpressure beyond the
+/// broadcast buffer — a slow client just misses frames, which is fine for a
 /// waterfall.
 async fn ws_handler(ws: WebSocketUpgrade, State(st): State<Arc<AppState>>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| websocket_loop(socket, st))
@@ -112,11 +291,11 @@ async fn chunks_handler(
     Json(rows)
 }
 
-// ---------------- Synthetic I/Q source ----------------
+// ---------------- Synthetic I/Q source (development only) ----------------
 
 /// Generate `n` complex baseband samples: a slow-drifting tone plus noise.
-/// Produces a visible moving band on the waterfall so the live feed is obviously
-/// real STFT output, not random per-bin noise.
+/// Produces a visible moving band on the waterfall so the local dev feed is
+/// obviously real STFT output, not random per-bin noise.
 fn gen_block(n: usize, phase: &mut u64, rng: &mut impl Rng) -> Vec<i8> {
     let mut samples = Vec::with_capacity(n);
     for _ in 0..n {
@@ -135,15 +314,27 @@ fn gen_block(n: usize, phase: &mut u64, rng: &mut impl Rng) -> Vec<i8> {
 
 /// Background engine: generate I/Q, run it through the STFT, fan each row out to
 /// WebSocket subscribers and the history ring. Runs on its own thread so a busy
-/// FFT never stalls the HTTP/WS runtime.
-fn engine_loop(st: Arc<AppState>, sweep_ms: u64) {
+/// FFT never stalls the HTTP/WS runtime. Only started for `--source synthetic`.
+fn engine_loop(st: Arc<AppState>, sweep_ms: u64, center_hz: f64, sample_rate_hz: f64) {
     let mut proc = StftProcessor::new(waterfall::FFT_SIZE, HOP_SIZE);
     let mut phase = 0u64;
     let mut rng = rand::thread_rng();
+    {
+        let mut p = st.producer.lock().unwrap();
+        p.source = "synthetic".to_string();
+        p.center_hz = center_hz;
+        p.sample_rate_hz = sample_rate_hz;
+    }
     loop {
         let block = gen_block(HOP_SIZE, &mut phase, &mut rng);
         for row in proc.push_bytes(&block) {
             let entry = SweepEntry::from_row(row);
+            {
+                let mut p = st.producer.lock().unwrap();
+                p.last_row_at = Some(SystemTime::now());
+                p.bins = entry.bins;
+                p.rows_ingested += 1;
+            }
             let _ = st.tx.send(entry.clone()); // ignore "no subscribers"
             let mut ring = st.ring.lock().unwrap();
             ring.push_back(entry);
@@ -160,31 +351,57 @@ fn engine_loop(st: Arc<AppState>, sweep_ms: u64) {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let flag = |name: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1).cloned())
+    };
+
     let listen = std::env::var("WATERFALL_LISTEN").unwrap_or_else(|_| "127.0.0.1:4780".into());
-    let static_dir = args
-        .iter()
-        .position(|a| a == "--static")
-        .and_then(|i| args.get(i + 1).cloned())
-        .unwrap_or_else(|| ".".into());
-    let sweep_ms: u64 = args
-        .iter()
-        .position(|a| a == "--sweep-ms")
-        .and_then(|i| args.get(i + 1))
+    let static_dir = flag("--static").unwrap_or_else(|| ".".into());
+    let sweep_ms: u64 = flag("--sweep-ms")
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);
+    let source = std::env::var("WATERFALL_SOURCE")
+        .ok()
+        .or_else(|| flag("--source"))
+        .unwrap_or_else(|| "synthetic".into());
+    let center_hz: f64 = flag("--center-freq")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(915_000_000.0);
+    let sample_rate_hz: f64 = flag("--sample-rate")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2_000_000.0);
+
+    let configured_source: &'static str = match source.as_str() {
+        "ingest" | "vita49" => "ingest",
+        _ => "synthetic",
+    };
 
     let (tx, _) = tokio::sync::broadcast::channel(128);
     let state = Arc::new(AppState {
         tx,
         ring: Mutex::new(VecDeque::new()),
+        producer: Mutex::new(ProducerMeta::default()),
+        configured_source,
     });
 
-    // Synthetic-feed engine thread.
-    let engine = Arc::clone(&state);
-    std::thread::spawn(move || engine_loop(engine, sweep_ms));
+    if configured_source == "synthetic" {
+        let engine = Arc::clone(&state);
+        std::thread::spawn(move || engine_loop(engine, sweep_ms, center_hz, sample_rate_hz));
+        println!("waterfall bridge: source=synthetic (development feed; no RF)");
+    } else {
+        println!(
+            "waterfall bridge: source=ingest — awaiting POST /ingest from waterfall-consumer; \
+             NO synthetic fallback (a dead feed reports stale, it does not fabricate rows)"
+        );
+    }
 
     let addr: SocketAddr = listen.parse().expect("invalid WATERFALL_LISTEN address");
-    println!("waterfall bridge: http://{addr}  (static: {static_dir})");
+    println!(
+        "waterfall bridge: http://{addr}  (static: {static_dir}, centre {:.0} Hz, {:.0} Hz sample rate)",
+        center_hz, sample_rate_hz
+    );
     let router = app(state, &static_dir);
     let listener = tokio::net::TcpListener::bind(addr).await.expect("bind failed");
     axum::serve(listener, router).await.expect("server error");

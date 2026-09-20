@@ -1,0 +1,121 @@
+# waterfall-consumer — the signal-middleware tier.
+#
+# Binds UDP 4820, parses the VITA 49 stream sigproc pushes, converts sc16 -> i8,
+# runs the STFT over every packet, and POSTs paced rows to waterfall-bridge.
+#
+# The Service name `waterfall-service` is hardcoded in the sigproc ConfigMap
+# (vita49_dest_host) and MUST stay exactly that; sigproc resolves it once and
+# caches the result, so the consumer must be Ready before this Service exists
+# (see deploy/README.md for the apply order).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waterfall-consumer
+  namespace: default
+  labels:
+    app: waterfall-consumer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: waterfall-consumer
+  template:
+    metadata:
+      labels:
+        app: waterfall-consumer
+    spec:
+      # Placement is a CONSTRAINT, not a pin: choose any amd64 node that is not
+      # the SDR node (rpi-four-2) or the control plane (sab-laptop-1). The
+      # image is linux/amd64, so amd64 is required by the image anyway; the
+      # NotIn keeps the live RF stream off the SDR node and the control plane.
+      # The infra agent may replace this with node labels/taints if preferred.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values: [amd64]
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: [rpi-four-2, sab-laptop-1]
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: waterfall-consumer
+          image: ghcr.io/rodoyle/waterfall:latest
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/waterfall-consumer"]
+          args:
+            - --listen=0.0.0.0:4820
+            - --bridge-url=http://waterfall-ui.default.svc.cluster.local:4780
+            - --center-freq=915000000
+            - --sample-rate=2000000
+            - --publish-hz=30
+            - --stats-listen=0.0.0.0:4830
+            - --rcvbuf=8388608
+            # Spike the first 3 datagrams to the log on every pod start, so the
+            # transport is proven before trusting the parser.
+            - --hexdump-first=3
+          ports:
+            - name: vita49
+              containerPort: 4820
+              protocol: UDP
+            - name: stats
+              containerPort: 4830
+              protocol: TCP
+          env:
+            - name: RUST_LOG
+              value: info
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 768Mi
+          # SO_RCVBUF needs to absorb ~8 MB/s of fragmented datagrams. The
+          # readiness probe is the consumer's own /healthz on the stats port.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: stats
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: stats
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+# waterfall-service — the DNS name sigproc is already sending to.
+#
+# UDP 4820 is the VITA 49 stream; TCP 4830 is the consumer's stats/healthz,
+# kept here so a single port-forward exposes both the transport and the
+# loss counters.
+apiVersion: v1
+kind: Service
+metadata:
+  name: waterfall-service
+  namespace: default
+  labels:
+    app: waterfall-consumer
+spec:
+  selector:
+    app: waterfall-consumer
+  ports:
+    - name: vita49
+      port: 4820
+      targetPort: vita49
+      protocol: UDP
+    - name: stats
+      port: 4830
+      targetPort: stats
+      protocol: TCP

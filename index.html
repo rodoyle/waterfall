@@ -31,6 +31,21 @@
         #controls select { background: #111; color: #eee; border: 1px solid #444; border-radius: 3px; padding: 1px 3px; }
         #controls button { background: #222; color: #eee; border: 1px solid #444; border-radius: 3px; padding: 2px 8px; cursor: pointer; }
         #controls button.running { border-color: #4a4; }
+        /* Live feed health: source, RF band, transport, and the middleware's
+           loss counters. Turns red when the feed goes stale. */
+        #statusReadout {
+            position: fixed;
+            bottom: 6px;
+            left: 8px;
+            z-index: 10;
+            color: #8c8;
+            background: rgba(10, 10, 10, 0.75);
+            font: 11px/1.4 monospace;
+            padding: 3px 8px;
+            border-radius: 4px;
+            border: 1px solid #333;
+            pointer-events: none;
+        }
     </style>
 </head>
 <body>
@@ -51,6 +66,8 @@
         </div>
         <div class="row"><button id="ctlRunPause" class="running">Pause</button></div>
     </div>
+    <div id="statusReadout">source: unknown</div>
+    <script type="module" src="axis.js"></script>
     <script src="dataClient.js"></script>
     <script src="main.js"></script>
 </body>

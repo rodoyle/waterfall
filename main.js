@@ -16,6 +16,14 @@ const config = {
     paused: false,         // run/pause toggle for the animation clock
     demo: true,            // use random generation only until real sweeps arrive
     status: 'offline',     // live | polling | offline (from dataClient)
+    // Absolute RF axis, filled in from the bridge's /meta (see axis.js). When
+    // `absoluteAxis` is true the plot labels real MHz instead of baseband Hz.
+    absoluteAxis: false,
+    centerHz: null,
+    sampleRateHz: null,
+    source: 'unknown',     // 'vita49' (live RF) | 'synthetic' (dev feed)
+    stale: true,           // no rows recently -> show it rather than fake data
+    consumer: null,        // middleware loss/rate counters from /meta
 };
 
 // Off-screen image we draw each sweep into, then blit onto the canvas with an
@@ -130,18 +138,20 @@ function renderPlot() {
     ctx.lineWidth = 1;
     ctx.strokeRect(padLeft, padTop, plotW, plotH);
 
-    // Frequency labels (y axis). Linear spacing by default; log spacing places
-    // labels at decade/octave-ish fractions of the axis so a log-scale SDR view
-    // still reads correctly (plan step 3: linear/log frequency axis scale).
+    // Frequency labels (y axis). On a live RF stream these are absolute MHz
+    // (axis.js); on the synthetic baseband feed they stay relative Hz. Log
+    // spacing only applies to the relative axis — a log scale across a 2 MHz
+    // window around 915 MHz would be meaningless.
     ctx.fillStyle = '#222';
     ctx.font = '12px sans-serif';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     const fLo = Math.max(1, config.freqMin); // log(0) is -inf; clamp floor
     const fHi = Math.max(fLo + 1, config.freqMax);
+    const useLog = config.freqScale === 'log' && !config.absoluteAxis;
     for (let i = 0; i <= 4; i++) {
         let f;
-        if (config.freqScale === 'log') {
+        if (useLog) {
             // log-space between fLo and fHi
             const t = i / 4;
             f = fLo * (fHi / fLo) ** t;
@@ -150,7 +160,23 @@ function renderPlot() {
             f = config.freqMin + (config.freqMax - config.freqMin) * i / 4;
         }
         const y = padTop + plotH - (plotH * i / 4);
-        ctx.fillText(`${f.toFixed(f >= 1000 ? 0 : 1)} Hz`, padLeft - 8, y);
+        const label = config.absoluteAxis
+            ? WaterfallAxis.formatHzLabel(f)
+            : `${f.toFixed(f >= 1000 ? 0 : 1)} Hz`;
+        ctx.fillText(label, padLeft - 8, y);
+    }
+
+    // Band annotation: on a live RF stream state the centre and span so the
+    // plot is self-describing without the controls panel.
+    if (config.absoluteAxis) {
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(
+            `${WaterfallAxis.formatHzLabel(config.centerHz)} centre  ·  ` +
+            `${(config.sampleRateHz / 1e6).toFixed(2)} MS/s  ·  ` +
+            `${WaterfallAxis.formatHzLabel(config.freqMin)} – ${WaterfallAxis.formatHzLabel(config.freqMax)}`,
+            padLeft + 6, padTop + 6
+        );
     }
 
     // Time label (x axis).
@@ -186,7 +212,45 @@ let liveClient = createLiveClient({
     numBins: config.numBins,
     onSweep: pushLiveSweep,
     onStatus: (s) => { config.status = s; },
+    onMeta: applyMeta,
 });
+
+// --- RF metadata (bridge /meta) ---
+// The bridge reports the producer, the RF centre/sample rate and the
+// middleware's loss counters. The axis is derived from it, and the readout
+// makes a dead feed visibly dead instead of quietly showing stale rows.
+function applyMeta(meta) {
+    if (!meta) return;
+    WaterfallAxis.applyMetaToConfig(config, meta);
+    config.source = meta.source || config.source;
+    config.stale = Boolean(meta.stale);
+    config.consumer = meta.consumer || null;
+    updateStatusReadout();
+    renderPlot();
+}
+
+function updateStatusReadout() {
+    const el = document.getElementById('statusReadout');
+    if (!el) return;
+    const c = config.consumer;
+    const parts = [
+        `source: ${config.source}`,
+        config.absoluteAxis
+            ? `${WaterfallAxis.formatHzLabel(config.centerHz)} ± ${(config.sampleRateHz / 2e6).toFixed(2)} MHz`
+            : 'baseband',
+        config.status,
+        config.stale ? 'stale' : 'fresh',
+    ];
+    if (c) {
+        const rate = Number(c.packets_received) > 0 ? `rx ${c.packets_received} pkts` : 'rx 0 pkts';
+        parts.push(rate, `gaps ${c.gaps}`, `missing ${c.missing_samples} samples`);
+        if (c.stft_dropped) parts.push(`stft_dropped ${c.stft_dropped}`);
+        if (c.publish_dropped) parts.push(`publish_dropped ${c.publish_dropped}`);
+        if (c.parse_errors) parts.push(`parse_errors ${c.parse_errors}`);
+    }
+    el.textContent = parts.join('  ·  ');
+    el.style.color = config.stale ? '#e66' : '#8c8';
+}
 
 // --- Animation clock (run/pause + sweep-rate aware) ---
 // Keep the interval as a clock and consume the freshest live frame when one
@@ -235,6 +299,7 @@ function applyGeometry() {
         numBins: config.numBins,
         onSweep: pushLiveSweep,
         onStatus: (s) => { config.status = s; },
+        onMeta: applyMeta,
     });
     liveClient.start();
     renderPlot();
@@ -306,13 +371,23 @@ function wireControls() {
 }
 
 // Seed the screen with silence so real rows fill in from the bottom upward
-// (no random demo junk behind live data).
-for (let i = 0; i < config.numRows; i++) {
-    appendSweep(new Float32Array(config.numBins));
-}
-renderPlot();
+// (no random demo junk behind live data), then connect. Boot waits for
+// DOMContentLoaded so `axis.js` (a module) is loaded first.
+function bootFrontend() {
+    for (let i = 0; i < config.numRows; i++) {
+        appendSweep(new Float32Array(config.numBins));
+    }
+    renderPlot();
 
-// Connect last so the very first delivered sweep lands on a seeded screen.
-liveClient.start();
-startClock();
-wireControls();
+    // Connect last so the very first delivered sweep lands on a seeded screen.
+    liveClient.start();
+    startClock();
+    wireControls();
+    updateStatusReadout();
+}
+
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootFrontend);
+} else {
+    bootFrontend();
+}

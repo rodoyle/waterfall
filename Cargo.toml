@@ -15,6 +15,9 @@ tower-http = { version = "0.5", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures-util = "0.3"
+# SO_RCVBUF sizing for the VITA49 receive socket (8 MB) and the ingest POST client
+socket2 = "0.5"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 [features]
 mlx = ["dep:mlx-sys"] # Enable MLX acceleration when this feature is selected

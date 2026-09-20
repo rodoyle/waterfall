@@ -1,0 +1,107 @@
+# Kaniko Job: builds the waterfall Dockerfile and pushes to GHCR.
+#
+# Mirrors sigproc's proven build path (see C:\Users\rodoyle\src\sigproc\deploy\
+# kaniko-job.yaml), with the builder pinned to an amd64 node instead of arm64 —
+# the runtime image is linux/amd64, and a native build avoids QEMU entirely.
+#
+# Requires (already present in this cluster):
+#   * secret `ghcr-push`   in namespace `build`  (kaniko push credentials)
+#   * secret `ghcr-pull`   in namespace `default` (Deployment pull credentials)
+#   * PVC `kaniko-scratch` in namespace `build`  (SMB-backed kaniko layers, so
+#     bulk writes stay off the nodes' disks)
+#
+# Apply:  kubectl delete job kaniko-build-waterfall -n build --ignore-not-found
+#         kubectl apply -f deploy/kaniko-job.yaml
+# Follow: kubectl -n build logs job/kaniko-build-waterfall -f
+#
+# NOTE: kaniko clones the repo from GitHub, so the commit under test must be
+# pushed to github.com/rodoyle/waterfall master BEFORE applying this Job.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kaniko-build-waterfall
+  namespace: build
+  labels:
+    app: waterfall
+    type: kaniko-build
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      # amd64 builder: the image is linux/amd64 and any amd64 node can host the
+      # build. This is builder placement, NOT workload placement.
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      restartPolicy: Never
+      initContainers:
+        # ── Clone the waterfall repo ─────────────────────────────────────────
+        - name: git-clone
+          image: alpine/git:latest
+          command:
+            - sh
+            - -c
+            - |
+              git clone --depth 1 \
+                https://github.com/rodoyle/waterfall.git /workspace
+              echo "Cloned waterfall repo to /workspace"
+              git -C /workspace log --oneline -1
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+        # ── Stage registry credentials on the writable SMB scratch ──────────
+        # Kaniko chowns/rewrites $KANIKO_DIR/.docker, which a read-only secret
+        # mount cannot satisfy, so copy the credentials onto the scratch volume.
+        - name: stage-kaniko-creds
+          image: busybox:latest
+          command:
+            - sh
+            - -c
+            - |
+              mkdir -p /kaniko-scratch/.docker
+              cp /secret/.dockerconfigjson /kaniko-scratch/.docker/config.json
+              chmod 0600 /kaniko-scratch/.docker/config.json
+              echo "Staged kaniko docker config"
+          volumeMounts:
+            - name: kaniko-secret
+              mountPath: /secret
+              readOnly: true
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+      containers:
+        # ── Build with kaniko and push to GHCR ──────────────────────────────
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --context=dir:///workspace
+            - --dockerfile=deploy/Dockerfile
+            - --destination=ghcr.io/rodoyle/waterfall:latest
+            - --cache=true
+            - --cache-ttl=24h
+            # Only re-hash files whose mtime changed instead of the whole FS.
+            - --snapshot-mode=redo
+            - --kaniko-dir=/kaniko-scratch
+          volumeMounts:
+            - name: workspace
+              mountPath: /workspace
+            - name: kaniko-scratch
+              mountPath: /kaniko-scratch
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "4Gi"
+              cpu: "2000m"
+      volumes:
+        - name: workspace
+          emptyDir: {}
+        - name: kaniko-secret
+          secret:
+            secretName: ghcr-push
+            items:
+              - key: .dockerconfigjson
+                path: .dockerconfigjson
+        - name: kaniko-scratch
+          persistentVolumeClaim:
+            claimName: kaniko-scratch

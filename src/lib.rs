@@ -17,6 +17,17 @@ use num_complex::Complex;
 use rayon::prelude::*;
 use rustfft::FftPlanner;
 
+/// VITA 49.0 wire-format parsing for the sigproc UDP stream (pure functions).
+pub mod vita49;
+
+/// Types shared by the middleware (consumer) and web tier (bridge), plus the
+/// latest-wins publish buffer.
+pub mod publish;
+
+/// The datagram → STFT pipeline (parse, sc16 → i8, FFT, gap tracking), shared by
+/// the consumer binary and the integration tests.
+pub mod consumer;
+
 // Constants derived from the spec.
 pub const FFT_SIZE: usize = 4096;
 pub const HOP_SIZE: usize = 1024; // 75% overlap: (4096-1024)/4096
@@ -457,8 +468,8 @@ mod tests {
 
         let mut max_energy = 0.0f32;
         let mut peak_bin = None;
-        for i in start..end {
-            let e = first_frame[i].norm_sqr();
+        for (i, bin) in first_frame.iter().enumerate().take(end).skip(start) {
+            let e = bin.norm_sqr();
             if e > max_energy {
                 max_energy = e;
                 peak_bin = Some(i);
@@ -543,7 +554,7 @@ mod tests {
 
         // Reference: batch path.
         let raw = stft(&bytes);
-        let expected_frames: Vec<Vec<f32>> = raw.chunks_exact(FFT_SIZE).map(|f| to_db(f)).collect();
+        let expected_frames: Vec<Vec<f32>> = raw.chunks_exact(FFT_SIZE).map(to_db).collect();
 
         // Incremental: split the byte stream into odd-sized chunks so the
         // carry-over boundary falls mid-frame.
@@ -559,12 +570,12 @@ mod tests {
         assert_eq!(collected.len(), expected_frames.len());
         for (got, exp) in collected.iter().zip(expected_frames.iter()) {
             assert_eq!(got.bins.len(), exp.len());
-            for j in 0..got.bins.len() {
+            for (j, expected) in exp.iter().enumerate().take(got.bins.len()) {
                 assert!(
-                    (got.bins[j] - exp[j]).abs() < 1e-3,
+                    (got.bins[j] - expected).abs() < 1e-3,
                     "bin {j} mismatch: incremental {} vs batch {}",
                     got.bins[j],
-                    exp[j]
+                    expected
                 );
             }
         }

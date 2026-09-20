@@ -1,0 +1,100 @@
+# waterfall-bridge — the web tier.
+#
+# Serves the front end (static files) and the WebSocket/REST row stream, fed by
+# POST /ingest from waterfall-consumer. NO synthetic fallback in this
+# deployment (--source=ingest): a dead RF feed reports stale on /meta instead
+# of fabricating rows, because fabricated rows look exactly like real signal on
+# a waterfall.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: waterfall-bridge
+  namespace: default
+  labels:
+    app: waterfall-bridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: waterfall-bridge
+  template:
+    metadata:
+      labels:
+        app: waterfall-bridge
+    spec:
+      # Same placement constraint as the consumer: amd64, not the SDR node and
+      # not the control plane. See waterfall-consumer.yaml for the rationale.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values: [amd64]
+                  - key: kubernetes.io/hostname
+                    operator: NotIn
+                    values: [rpi-four-2, sab-laptop-1]
+      imagePullSecrets:
+        - name: ghcr-pull
+      containers:
+        - name: waterfall-bridge
+          image: ghcr.io/rodoyle/waterfall:latest
+          imagePullPolicy: Always
+          # The image ENTRYPOINT is the bridge; CMD selects the producer.
+          command: ["/usr/local/bin/waterfall"]
+          args:
+            - --source=ingest
+            - --static=/app/static
+            - --center-freq=915000000
+            - --sample-rate=2000000
+          ports:
+            - name: http
+              containerPort: 4780
+              protocol: TCP
+          env:
+            - name: WATERFALL_LISTEN
+              value: 0.0.0.0:4780
+            - name: RUST_LOG
+              value: info
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          readinessProbe:
+            httpGet:
+              path: /meta
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /meta
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 20
+---
+# waterfall-ui — ClusterIP for the bridge's HTTP/WS/REST (reached by the
+# consumer and by `kubectl -n default port-forward svc/waterfall-ui 4780:4780`).
+apiVersion: v1
+kind: Service
+metadata:
+  name: waterfall-ui
+  namespace: default
+  labels:
+    app: waterfall-bridge
+spec:
+  selector:
+    app: waterfall-bridge
+  ports:
+    - name: http
+      port: 4780
+      targetPort: http
+      protocol: TCP

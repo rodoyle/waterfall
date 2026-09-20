@@ -8,6 +8,9 @@
 //   * When the WebSocket isn't talking (never connected, or dropped), it falls
 //     back to polling `GET /chunks?time=<cursor>&size=<n>` on an interval.
 //   * Report a status string to the UI: "live" | "polling" | "offline".
+//   * Poll `GET /meta` on a slow interval and hand the payload to `onMeta` so
+//     the plot can label absolute RF frequencies and show the feed's health
+//     (producer, gaps, drops) instead of silently rendering stale rows.
 
 ((global) => {
     
@@ -34,19 +37,25 @@
     //   numBins     display row width (downsampled to)
     //   onSweep     (Float32Array) one normalized sweep
     //   onStatus    ("live"|"polling"|"offline")
+    //   onMeta      (object) bridge /meta payload (RF axis + feed health)
     //   wsPath      default "/ws"
     //   chunksPath  default "/chunks"
+    //   metaPath    default "/meta"
     //   pollMs      fallback poll interval (default 250)
+    //   metaMs      metadata poll interval (default 1000)
     function createLiveClient(opts) {
         const wsPath = opts.wsPath || '/ws';
         const chunksPath = opts.chunksPath || '/chunks';
+        const metaPath = opts.metaPath || '/meta';
         const pollMs = opts.pollMs || 250;
+        const metaMs = opts.metaMs || 1000;
         const numBins = opts.numBins;
 
         let ws = null;
         let reconnects = 0;
         let reconnectTimer = null;
         let pollTimer = null;
+        let metaTimer = null;
         let lastSamples = 0; // poll cursor: only fetch rows newer than this
         let closed = false;
 
@@ -133,10 +142,33 @@
             if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
         }
 
+        // ---- Metadata (RF axis + feed health) ----
+        function pollMeta() {
+            fetch(metaPath)
+                .then((r) => (r.ok ? r.json() : null))
+                .then((meta) => {
+                    if (closed || !meta) return;
+                    if (opts.onMeta) opts.onMeta(meta);
+                })
+                .catch(() => {});
+        }
+
+        function startMeta() {
+            if (!closed && !metaTimer) {
+                pollMeta();
+                metaTimer = setInterval(pollMeta, metaMs);
+            }
+        }
+
+        function stopMeta() {
+            if (metaTimer) { clearInterval(metaTimer); metaTimer = null; }
+        }
+
         function start() {
             setStatus('polling');
             openWs();
             startPolling();
+            startMeta();
         }
 
         function close() {
@@ -144,6 +176,7 @@
             if (ws) { try { ws.close(); } catch (_) {} ws = null; }
             if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
             stopPolling();
+            stopMeta();
         }
 
         return { start, close };
