@@ -94,28 +94,7 @@ spec:
               port: stats
             initialDelaySeconds: 10
             periodSeconds: 20
----
-# waterfall-service — the DNS name sigproc is already sending to.
-#
-# UDP 4820 is the VITA 49 stream; TCP 4830 is the consumer's stats/healthz,
-# kept here so a single port-forward exposes both the transport and the
-# loss counters.
-apiVersion: v1
-kind: Service
-metadata:
-  name: waterfall-service
-  namespace: default
-  labels:
-    app: waterfall-consumer
-spec:
-  selector:
-    app: waterfall-consumer
-  ports:
-    - name: vita49
-      port: 4820
-      targetPort: vita49
-      protocol: UDP
-    - name: stats
-      port: 4830
-      targetPort: stats
-      protocol: TCP
+# NOTE: the Service that sigproc resolves (`waterfall-service`) deliberately
+# lives in its own file, deploy/waterfall-service.yaml, so it can be applied
+# LAST — after this Deployment is Ready and bound to UDP 4820. See
+# deploy/README.md for why that ordering is load-bearing.

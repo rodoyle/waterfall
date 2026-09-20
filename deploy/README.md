@@ -59,7 +59,7 @@ kubectl apply -f deploy/waterfall-bridge.yaml
 kubectl -n default rollout status deploy/waterfall-bridge
 
 # 5. ONLY NOW create the Service sigproc is waiting for.
-kubectl apply -f deploy/waterfall-service-only.yaml   # or extract the Service
+kubectl apply -f deploy/waterfall-service.yaml   # the DNS name, applied last
 kubectl -n default logs deploy/sigproc --tail=5       # expect: "forwarding started"
 
 # 6. Watch the transport and open the waterfall.
@@ -68,10 +68,7 @@ kubectl -n default port-forward svc/waterfall-ui 4780:4780
 #   → http://127.0.0.1:4780/
 ```
 
-Because the consumer Deployment and its Service live in one file, applying
-`waterfall-consumer.yaml` in step 3 creates the Service early. Split the
-`Service` block out of that file (or apply the Deployment alone) if you need the
-strict ordering above.
+Because the consumer Deployment and its Service are split across two files, the apply order in step 3 (Deployment) and step 5 (Service) is exactly the ordering the one-shot DNS resolution requires.
 
 ## Scheduling constraint (for the infra agent)
 
