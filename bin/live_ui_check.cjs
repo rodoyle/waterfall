@@ -1,9 +1,11 @@
 // live_ui_check.cjs — headless verification of the live waterfall UI.
 //
-// Same playwright already used by palantir.smoke.cjs. Run it with the live feed
-// reachable (e.g. `kubectl -n default port-forward svc/waterfall-ui 4780:4780`):
+// Same playwright already used by palantir.smoke.cjs. Run it against the live
+// feed either through the Ingress host or a port-forward:
 //
-//   node bin/live_ui_check.cjs
+//   node bin/live_ui_check.cjs                     # default: http://127.0.0.1:4780/
+//   WATERFALL_URL=http://orbweaver.apps.home.arpa/ node bin/live_ui_check.cjs
+//   kubectl -n default port-forward svc/orbweaver-ui 4780:4780
 //
 // Asserts, against the REAL feed rather than a fixture:
 //   * zero page errors,

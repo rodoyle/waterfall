@@ -171,7 +171,10 @@ fn load_config() -> Config {
             cli::parse_or(
                 &args,
                 "--bridge-url",
-                "http://waterfall-ui.default.svc.cluster.local:4780".to_string(),
+                // Canonical Service name (the pre-rename `waterfall-ui` no longer
+                // exists, so a stale default would fail DNS for anyone running
+                // this binary without an explicit --bridge-url).
+                "http://orbweaver-ui.default.svc.cluster.local:4780".to_string(),
             )
         }),
         sample_rate: cli::parse_or(&args, "--sample-rate", 2_000_000.0_f64),
