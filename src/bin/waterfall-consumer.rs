@@ -67,6 +67,11 @@ struct Counters {
     last_counter: AtomicI64,
     /// Effective SO_RCVBUF granted by the kernel.
     rcvbuf_bytes: AtomicU64,
+    /// Largest |sc16| component seen — the number that decides whether an 8-bit
+    /// downshift would be lossy (live RF peaks around ±46).
+    signal_peak_sc16: AtomicU64,
+    /// Mean |sc16| component level, in thousandths.
+    signal_mean_milli: AtomicU64,
 }
 
 impl Counters {
@@ -104,6 +109,9 @@ struct StatsSnapshot {
     out_of_order: u64,
     last_sample_counter: Option<u64>,
     rcvbuf_bytes: u64,
+    /// Peak and mean |sc16| level of the live RF (see note in PacketProcessor).
+    signal_peak_sc16: u64,
+    signal_mean_abs: f64,
 }
 
 /// Configuration resolved from flags/environment.
@@ -279,11 +287,15 @@ fn spike_inspect(n: u64, datagram: &[u8], cfg: &Config) {
             // (see tests/tone_db.rs).
             let mut values = std::collections::HashSet::new();
             let mut nonzero = 0usize;
+            let mut abs_sum = 0u64;
+            let mut peak_abs = 0i16;
             for c in pkt.payload.chunks_exact(2) {
                 let v = i16::from_be_bytes([c[0], c[1]]);
                 if v != 0 {
                     nonzero += 1;
                 }
+                abs_sum += v.unsigned_abs() as u64;
+                peak_abs = peak_abs.max(v.saturating_abs());
                 values.insert(v);
             }
             let total = pkt.components().max(1);
@@ -299,11 +311,13 @@ fn spike_inspect(n: u64, datagram: &[u8], cfg: &Config) {
                 pkt.size_field_matches
             );
             println!(
-                "SPIKE   payload: {} components, {} distinct i16 values, {} non-zero ({:.0}%) -> degenerate_payload={}",
+                "SPIKE   payload: {} components, {} distinct i16 values, {} non-zero ({:.0}%), peak |sc16|={}, mean |sc16|={:.1} -> degenerate_payload={}",
                 pkt.components(),
                 values.len(),
                 nonzero,
                 100.0 * nonzero as f64 / total as f64,
+                peak_abs,
+                abs_sum as f64 / total as f64,
                 degenerate
             );
             if !pkt.size_field_matches {
@@ -451,6 +465,14 @@ fn analysis_worker(
     while let Some(datagram) = rx.blocking_recv() {
         let outcome = pipeline.observe(&datagram);
 
+        stats
+            .signal_peak_sc16
+            .store(pipeline.peak_abs() as u64, Ordering::Relaxed);
+        stats.signal_mean_milli.store(
+            (pipeline.mean_abs() * 1000.0) as u64,
+            Ordering::Relaxed,
+        );
+
         for row in outcome.rows {
             Counters::bump(&stats.rows_produced);
             let mut b = batch.lock().expect("batch mutex poisoned");
@@ -579,6 +601,8 @@ fn snapshot(
         out_of_order: stats.out_of_order.load(Ordering::Relaxed),
         last_sample_counter: if last < 0 { None } else { Some(last as u64) },
         rcvbuf_bytes: stats.rcvbuf_bytes.load(Ordering::Relaxed),
+        signal_peak_sc16: stats.signal_peak_sc16.load(Ordering::Relaxed),
+        signal_mean_abs: stats.signal_mean_milli.load(Ordering::Relaxed) as f64 / 1000.0,
     }
 }
 
@@ -624,6 +648,10 @@ async fn stats_loop(stats: Arc<Counters>, cfg: Arc<Config>) {
             snap.bridge_errors,
             snap.last_sample_counter,
             snap.rcvbuf_bytes,
+        );
+        println!(
+            "consumer signal: peak |sc16|={} mean |sc16|={:.1} (an 8-bit downshift is lossless only above 256)",
+            snap.signal_peak_sc16, snap.signal_mean_abs
         );
     }
 }

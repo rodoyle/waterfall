@@ -266,3 +266,174 @@ fn a_socket_level_timestamp_jump_is_reported_as_a_gap() {
     assert_eq!(tracker.gaps, 1);
     assert_eq!(tracker.missing_samples, 2048 * 3);
 }
+
+/// The REAL datagram captured from live sigproc traffic on 2026-09-20
+/// (deployed consumer, `--capture-fixture`), committed so the parser is verified
+/// against actual bytes rather than only against bytes this repo generated.
+///
+/// Measured content: 8212 bytes, header 0x10D00804, 2048 complex sc16 samples of
+/// genuine 915 MHz band RF — and a PEAK ABSOLUTE COMPONENT OF only 46. That
+/// quietness is the whole reason the live path keeps 16-bit resolution.
+#[test]
+fn real_captured_sigproc_datagram_parses() {
+    let datagram: &[u8] = include_bytes!("fixtures/sigproc-full-packet.bin");
+
+    assert_eq!(datagram.len(), 8212, "live full-rate packet is 2053 words");
+    assert_eq!(
+        &datagram[0..4],
+        &[0x10, 0xd0, 0x08, 0x04],
+        "header 0x10D00804 (type 0x1, TSI 3, TSF 1, size 2052)"
+    );
+
+    let packet = parse_datagram(datagram).expect("live datagram parses");
+    assert_eq!(packet.header.packet_type, 1);
+    assert_eq!(packet.header.tsi, 3, "free-running timestamps");
+    assert_eq!(packet.header.tsf, 1, "fraction in sample counts");
+    assert_eq!(packet.header.packet_count, 0, "not populated by the sender");
+    assert_eq!(packet.header.size_words, 2052);
+    assert!(packet.size_field_matches, "declared size == delivered length");
+    assert_eq!(packet.stream_id, 0, "always 0 today");
+    assert_eq!(packet.complex_samples(), NOMINAL_COMPLEX_SAMPLES);
+    assert_eq!(packet.trailing_bytes, 0);
+
+    let components = packet.payload_i16();
+    assert_eq!(components.len(), NOMINAL_COMPLEX_SAMPLES * 2);
+
+    // Genuine RF: many distinct values, mostly non-zero.
+    let distinct: std::collections::HashSet<i16> = components.iter().copied().collect();
+    assert!(distinct.len() > 20, "real noise floor, {} distinct", distinct.len());
+    let non_zero = components.iter().filter(|&&v| v != 0).count();
+    assert!(non_zero * 10 > components.len() * 9, ">90% non-zero");
+
+    // THE POINT: the live band is quiet, far below the 8-bit LSB.
+    let peak = components.iter().map(|v| v.saturating_abs()).max().unwrap();
+    assert!(
+        peak < 256,
+        "live peak |sc16| is {peak}: below the `>> 8` LSB, so an 8-bit \
+         downshift would destroy this signal (see the test below)"
+    );
+
+    // The sample counter is reconstructible from the real timestamp pair.
+    assert_eq!(
+        packet.sample_counter(NOMINAL_SAMPLE_RATE),
+        packet.ts_int as u64 * NOMINAL_SAMPLE_RATE as u64 + packet.ts_frac
+    );
+
+    // The sc16 path renders this quiet packet with real structure.
+    let mut processor = PacketProcessor::new(NOMINAL_SAMPLE_RATE);
+    let mut rows = processor.observe(datagram).rows;
+    rows.extend(processor.observe(datagram).rows);
+    assert!(!rows.is_empty(), "two live datagrams fill a 4096-sample window");
+    let row = &rows[rows.len() - 1];
+    assert_eq!(row.bins.len(), FFT_SIZE);
+    let spread = row.bins.iter().cloned().fold(f32::MIN, f32::max)
+        - row.bins.iter().cloned().fold(f32::MAX, f32::min);
+    assert!(
+        spread > 5.0,
+        "live spectrum has structure at 16-bit resolution (spread {spread:.1} dB)"
+    );
+    assert_eq!(processor.peak_abs(), peak, "processor reports the live level");
+    assert!(processor.mean_abs() > 1.0, "mean level {}", processor.mean_abs());
+}
+
+/// The 8-bit downshift is only lossless for full-scale input. On this live band
+/// it collapses the signal to `{0, -1}` with a ~-0.5 LSB DC bias, which is what
+/// the waterfall would render as a flat field with a DC spur.
+#[test]
+fn i8_downshift_destroys_live_level_signal() {
+    let datagram: &[u8] = include_bytes!("fixtures/sigproc-full-packet.bin");
+    let packet = parse_datagram(datagram).expect("parses");
+
+    let iq = packet.to_i8();
+    let distinct: std::collections::HashSet<i8> = iq.iter().copied().collect();
+    assert!(
+        distinct.len() <= 2,
+        "downshifted live RF collapses to {distinct:?}"
+    );
+    assert!(
+        distinct.iter().all(|v| *v == 0 || *v == -1),
+        "only {{0,-1}} survive: {distinct:?}"
+    );
+
+    // Negative components bias to -1 while positives vanish -> DC offset, which
+    // is not a noise floor, it is an artifact.
+    let mean = iq.iter().map(|&v| v as f64).sum::<f64>() / iq.len() as f64;
+    assert!(mean < -0.4, "hard DC bias introduced by >>8: mean {mean}");
+
+    // Contrast with the full-resolution path, which preserves the same bytes.
+    let components = packet.payload_i16();
+    let peak = components.iter().map(|v| v.saturating_abs()).max().unwrap();
+    assert!(peak > 0, "the signal exists in the original samples");
+    assert!(
+        iq.iter().all(|&v| v == 0 || v == -1) && peak >= 1,
+        "the information was in the low bits"
+    );
+}
+
+/// The sc16 path must place a quiet tone (at live levels) on its bin and report
+/// its level, which the 8-bit path cannot do.
+#[test]
+fn quiet_tones_keep_their_bin_and_level_on_the_sc16_path() {
+    // Amplitude 46 == the measured peak of the live band.
+    const QUIET_SC16: i16 = 46;
+    let packets: Vec<Vec<u8>> = (0..4)
+        .map(|p| {
+            let mut samples = Vec::with_capacity(NOMINAL_COMPLEX_SAMPLES);
+            for k in 0..NOMINAL_COMPLEX_SAMPLES {
+                let n = (p * NOMINAL_COMPLEX_SAMPLES + k) as f64;
+                let theta = 2.0 * std::f64::consts::PI * TONE_BIN as f64 * n / FFT_SIZE as f64;
+                samples.push((
+                    (QUIET_SC16 as f64 * theta.cos()) as i16,
+                    (QUIET_SC16 as f64 * theta.sin()) as i16,
+                ));
+            }
+            build_packet(0, (p * NOMINAL_COMPLEX_SAMPLES) as u64, &samples)
+        })
+        .collect();
+
+    let mut processor = PacketProcessor::new(NOMINAL_SAMPLE_RATE);
+    let row = row_from(&mut processor, &over_udp(&packets));
+
+    let (bin, dbfs) = peak(&row.bins);
+    assert_eq!(bin, TONE_BIN, "quiet tone still lands on its bin");
+
+    // 20*log10(46 / 32767) = -57.06 dBFS against the 16-bit reference.
+    let expected = 20.0 * (QUIET_SC16 as f32 / 32767.0).log10();
+    assert!(
+        (dbfs - expected).abs() <= 1.5,
+        "expected ~{expected:.2} dBFS for a quiet sc16 tone, got {dbfs:.2}"
+    );
+    assert!(
+        dbfs - second_peak(&row.bins) > 15.0,
+        "quiet tone is still clean (peak {dbfs:.1} vs next {:.1})",
+        second_peak(&row.bins)
+    );
+}
+
+/// A full-scale sc16 tone reads 0 dBFS on the 16-bit reference, so the
+/// calibration keeps the same meaning as the 8-bit reference.
+#[test]
+fn full_scale_sc16_tone_reads_zero_dbfs() {
+    let packets: Vec<Vec<u8>> = (0..4)
+        .map(|p| {
+            let mut samples = Vec::with_capacity(NOMINAL_COMPLEX_SAMPLES);
+            for k in 0..NOMINAL_COMPLEX_SAMPLES {
+                let n = (p * NOMINAL_COMPLEX_SAMPLES + k) as f64;
+                let theta = 2.0 * std::f64::consts::PI * TONE_BIN as f64 * n / FFT_SIZE as f64;
+                samples.push((
+                    (32767.0 * theta.cos()).round() as i16,
+                    (32767.0 * theta.sin()).round() as i16,
+                ));
+            }
+            build_packet(0, (p * NOMINAL_COMPLEX_SAMPLES) as u64, &samples)
+        })
+        .collect();
+
+    let mut processor = PacketProcessor::new(NOMINAL_SAMPLE_RATE);
+    let (bin, dbfs) = peak(&row_from(&mut processor, &over_udp(&packets)).bins);
+    assert_eq!(bin, TONE_BIN);
+    assert!(
+        dbfs >= -1.0,
+        "a full-scale sc16 tone must read ~0 dBFS (clamped at 0), got {dbfs}"
+    );
+}

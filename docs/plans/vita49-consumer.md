@@ -12,8 +12,20 @@ tone/dBFS integration test in `tests/tone_db.rs`.
 > the source of truth where they disagree with the rest of the file.
 >
 > - Payload is **sc16** (signed 16-bit interleaved I/Q), **not 8-bit**. The
->   consumer converts each component with `sample >> 8` to the i8 the STFT
->   expects, preserving the 127 full-scale reference `to_db` calibrates against.
+>   consumer feeds `StftProcessor::push_sc16` at FULL 16-bit resolution and
+>   references dBFS to the sc16 full scale (32767), so a full-scale tone still
+>   reads 0 dBFS.
+>
+>   The alternative — `sample >> 8` to the existing i8 path — preserves the 127
+>   reference exactly and IS implemented and tested (`Packet::to_i8`,
+>   `StftProcessor::push_bytes`), but measurements of the live band on
+>   2026-09-20 show it is unusable there: real 915 MHz traffic peaks at
+>   **|sc16| = 46** (mean 9.5), far below the 8-bit LSB of 256, so `>> 8` maps
+>   positives to 0 and negatives to -1. The result is a 2-level signal with a
+>   -0.5 LSB DC bias (measured: 2044/4096 components non-zero, all -1), which
+>   renders as a flat field with a DC spur instead of band structure. See
+>   `tests/tone_db.rs` (`i8_downshift_destroys_live_level_signal`,
+>   `quiet_tones_keep_their_bin_and_level_on_the_sc16_path`).
 > - **One packet per UDP datagram**, not multiple. Size the parser from the
 >   datagram length, never assume 8212.
 > - **No context packets, ever.** Sample rate (2 MS/s), bit depth (sc16) and

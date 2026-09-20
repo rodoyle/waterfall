@@ -1,0 +1,2 @@
+# Captured wire-format fixtures are binary: never apply end-of-line conversion.
+*.bin binary

@@ -48,6 +48,9 @@ pub struct PacketProcessor {
     processor: StftProcessor,
     sample_rate: f64,
     malformed: u64,
+    samples_seen: u64,
+    abs_sum: u64,
+    peak_abs: i16,
 }
 
 impl PacketProcessor {
@@ -57,6 +60,9 @@ impl PacketProcessor {
             processor: StftProcessor::new(FFT_SIZE, HOP_SIZE),
             sample_rate,
             malformed: 0,
+            samples_seen: 0,
+            abs_sum: 0,
+            peak_abs: 0,
         }
     }
 
@@ -73,11 +79,17 @@ impl PacketProcessor {
         let complex_samples = packet.complex_samples();
         let counter = packet.sample_counter(self.sample_rate);
 
-        // sc16 >> 8 preserves the 8-bit full-scale reference `to_db` calibrates
-        // against. Reinterpreting the bytes as i8 instead would smear energy
-        // across bins — see the tone test in `tests/tone_db.rs`.
-        let iq = packet.to_i8();
-        let rows = self.processor.push_bytes(&iq);
+        // Full 16-bit resolution, dBFS referenced to the sc16 full scale
+        // (32767). Live sigproc RF peaks around ±46, so the i8 `>> 8` path would
+        // quantize it to {0, -1} and flatten the waterfall; see
+        // `to_db_with_reference` and the quiet-tone test in tests/tone_db.rs.
+        let iq = packet.payload_i16();
+        for &component in &iq {
+            self.samples_seen += 1;
+            self.abs_sum += component.unsigned_abs() as u64;
+            self.peak_abs = self.peak_abs.max(component.saturating_abs());
+        }
+        let rows = self.processor.push_sc16(&iq);
 
         Outcome {
             rows,
@@ -91,6 +103,27 @@ impl PacketProcessor {
     /// Datagrams rejected as malformed.
     pub fn malformed(&self) -> u64 {
         self.malformed
+    }
+
+    /// Largest absolute component seen, in sc16 units.
+    ///
+    /// Surfaced because it is the number that decides whether an 8-bit
+    /// downshift would be lossy: live RF around ±46 collapses under `>> 8`.
+    pub fn peak_abs(&self) -> i16 {
+        self.peak_abs
+    }
+
+    /// Components observed (2 per complex sample).
+    pub fn samples_seen(&self) -> u64 {
+        self.samples_seen
+    }
+
+    /// Mean absolute component level, in sc16 units.
+    pub fn mean_abs(&self) -> f64 {
+        if self.samples_seen == 0 {
+            return 0.0;
+        }
+        self.abs_sum as f64 / self.samples_seen as f64
     }
 
     /// Samples consumed by the STFT so far.

@@ -184,11 +184,28 @@ impl<'a> Packet<'a> {
             .saturating_add(self.ts_frac)
     }
 
-    /// Convert the sc16 payload to the interleaved 8-bit I/Q the STFT consumes.
+    /// Decode the payload as interleaved signed 16-bit components (sc16).
     ///
-    /// Each component is shifted right by 8: sc16 full scale 32767 >> 8 == 127,
-    /// which is exactly the reference `waterfall::to_db` calibrates against, so
-    /// dBFS stays meaningful and `lib.rs` needs no change.
+    /// This is the deployed path: it keeps the full 16-bit resolution. Live
+    /// sigproc traffic on a quiet band peaks around ±46, so downshifting to i8
+    /// would quantize essentially everything to {0, -1}.
+    pub fn payload_i16(&self) -> Vec<i16> {
+        self.payload
+            .chunks_exact(2)
+            .map(|c| i16::from_be_bytes([c[0], c[1]]))
+            .collect()
+    }
+
+    /// Convert the sc16 payload to the interleaved 8-bit I/Q the legacy STFT
+    /// input expects, by shifting each component right by 8.
+    ///
+    /// sc16 full scale 32767 >> 8 == 127, which is exactly the reference
+    /// `waterfall::to_db` calibrates against, so dBFS stays meaningful for
+    /// full-scale signals — but ONLY for full-scale signals. Measured live RF
+    /// peaks at ±46, where this collapse to {0, -1} discards the signal and adds
+    /// a -0.5 LSB DC bias. Kept for the documented 8-bit baseline and its tests;
+    /// the consumer uses [`Packet::payload_i16`] with
+    /// `StftProcessor::push_sc16` instead.
     ///
     /// The bytes must NOT be reinterpreted as i8 — that yields interleaved
     /// garbage with a plausible-looking noise floor.

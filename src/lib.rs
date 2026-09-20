@@ -234,6 +234,21 @@ fn bytes_to_complex(bytes: &[i8]) -> Vec<Complex<f32>> {
         .collect()
 }
 
+/// Decode interleaved 16-bit signed I/Q (VITA49 sc16) into Complex<f32> at FULL
+/// resolution — the deployed RF path.
+fn sc16_to_complex(samples: &[i16]) -> Vec<Complex<f32>> {
+    samples
+        .chunks_exact(2)
+        .map(|c| Complex::new(c[0] as f32, c[1] as f32))
+        .collect()
+}
+
+/// Full-scale reference for 8-bit I/Q (signed i8, positive max).
+pub const I8_FULL_SCALE: f32 = 127.0;
+
+/// Full-scale reference for 16-bit sc16 I/Q (signed i16, positive max).
+pub const SC16_FULL_SCALE: f32 = 32767.0;
+
 /// Window already applied upstream (spec); no-op placeholder.
 fn apply_window(_samples: &mut [Complex<f32>]) {}
 
@@ -294,30 +309,44 @@ pub fn stft(input_bytes: &[i8]) -> Vec<Complex<f32>> {
 /// display range (see `docs/plans/frontend.md`)
 const DB_FLOOR: f32 = -100.0;
 
-/// Convert complex FFT bins to dBFS power values.
-///
-/// Mapping: an 8-bit signed I/Q sample has full-scale amplitude 127 per
-/// component. A complex tone of amplitude `A` (analytic, single-sided) lands at
-/// bin magnitude `|X[k]| ≈ A * N` for an `N`-point forward FFT, so normalizing by
-/// `N` and referencing 127 gives `0 dBFS` for a full-scale tone and a
-/// meaningful [DB_FLOOR, 0] range for everything else.
-///
-/// ```text
-/// dbfs = 20 * log10( |X[k]| / N ) - 20 * log10(127),  clamped to [DB_FLOOR, 0]
-/// ```
-/// Convert complex FFT bins to dBFS power.
+/// Convert complex FFT bins to dBFS power, referenced to the 8-bit full scale.
 ///
 /// * `bins` – one row of complex FFT output (length = FFT size).
-/// * Returns one dBFS value per bin in [DB_FLOOR, 0].
+/// * Returns one dBFS value per bin in `[DB_FLOOR, 0]`.
+///
+/// Kept for the 8-bit path and the existing tests; the live RF path uses
+/// [`to_db_with_reference`] with the 16-bit reference (see
+/// [`StftProcessor::push_sc16`]).
 pub fn to_db(bins: &[Complex<f32>]) -> Vec<f32> {
+    to_db_with_reference(bins, I8_FULL_SCALE)
+}
+
+/// Convert complex FFT bins to dBFS power against an explicit full-scale
+/// reference (127 for i8, 32767 for sc16).
+///
+/// Mapping: a complex tone of amplitude `A` (analytic, single-sided) lands at bin
+/// magnitude `|X[k]| ≈ A * N` for an `N`-point forward FFT, so normalizing by `N`
+/// and referencing `full_scale` gives `0 dBFS` for a full-scale tone:
+///
+/// ```text
+/// dbfs = 20 * log10( |X[k]| / N ) - 20 * log10(full_scale)   clamped to [DB_FLOOR, 0]
+/// ```
+///
+/// The reference is a parameter because the live RF path must keep 16-bit
+/// resolution: sigproc's sc16 output on a quiet band peaks around ±46, so
+/// downshifting to i8 (`>> 8`) collapses it to {0, -1} with a -0.5 LSB DC bias
+/// and the waterfall shows a flat floor instead of band structure. Referencing
+/// 32767 keeps the same dBFS meaning (full scale == 0 dBFS) without discarding
+/// the low bits.
+pub fn to_db_with_reference(bins: &[Complex<f32>], full_scale: f32) -> Vec<f32> {
     let n = bins.len().max(1) as f32;
+    let reference = if full_scale > 0.0 { full_scale } else { 1.0 };
     bins.iter()
         .map(|c| {
-            // #/N = amplitude (FFT-gain normalization); reference full-scale 8-bit
-            // amplitude 127 so a full-scale tone reads 0 dBFS. Log floor on `amp`
+            // #/N = amplitude (FFT-gain normalization); the log floor on `amp`
             // avoids log(0) and maps into [DB_FLOOR, 0].
             let amp = (c.norm() / n).max(1e-12);
-            let dbfs = 20.0 * (amp / 127.0).log10();
+            let dbfs = 20.0 * (amp / reference).log10();
             dbfs.clamp(DB_FLOOR, 0.0)
         })
         .collect()
@@ -371,8 +400,27 @@ impl StftProcessor {
 
     /// Feed interleaved signed 8-bit I/Q bytes, returning any frames completed
     /// by this call in time order (0..n rows).
+    ///
+    /// dBFS is referenced to the 8-bit full scale (127).
     pub fn push_bytes(&mut self, iq: &[i8]) -> Vec<Row> {
-        self.pending.extend(bytes_to_complex(iq));
+        self.push_samples(bytes_to_complex(iq), I8_FULL_SCALE)
+    }
+
+    /// Feed interleaved signed 16-bit I/Q samples (VITA49 sc16), returning any
+    /// frames completed by this call in time order.
+    ///
+    /// This is the deployed RF path: it keeps the full 16-bit resolution and
+    /// references dBFS to the 16-bit full scale (32767), so a quiet band still
+    /// renders structure. Downshifting to i8 first would quantize live
+    /// amplitudes of ±46 to {0, -1} (see `to_db_with_reference`).
+    pub fn push_sc16(&mut self, iq: &[i16]) -> Vec<Row> {
+        self.push_samples(sc16_to_complex(iq), SC16_FULL_SCALE)
+    }
+
+    /// Shared framing: accumulate samples, emit one window per `hop` once a full
+    /// `fft_size` window is available.
+    fn push_samples(&mut self, samples: Vec<Complex<f32>>, full_scale: f32) -> Vec<Row> {
+        self.pending.extend(samples);
         let mut out = Vec::new();
         while self.pending.len() >= self.fft_size {
             let mut window: Vec<Complex<f32>> = self.pending[..self.fft_size].to_vec();
@@ -380,7 +428,7 @@ impl StftProcessor {
             let _ = self.backend.process(&mut window);
             out.push(Row {
                 sample: self.next_sample,
-                bins: to_db(&window),
+                bins: to_db_with_reference(&window, full_scale),
             });
             // Consume `hop` samples, keeping `fft_size - hop` overlap for the
             // next frame.

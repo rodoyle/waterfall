@@ -28,7 +28,11 @@ See `docs/plans/` for the master plan (`overview.md`) and per-component plans.
 
   The wire format is sc16 (not 8-bit), one packet per datagram, 8212 bytes at
   full rate, header `0x10D00804`; the sender's framing bug that made the first
-  send panic is fixed in `sigproc` (commit `7c8f80e`). See
+  send panic is fixed in `sigproc` (commit `7c8f80e`). The RF path keeps **full
+  16-bit resolution** (`StftProcessor::push_sc16`, dBFS referenced to 32767)
+  because the live 915 MHz band peaks at `|sc16| = 46` — an 8-bit `>> 8`
+  downshift would collapse it to `{0, -1}` with a DC bias and flatten the
+  waterfall. The 8-bit path is retained and tested. See
   `docs/plans/vita49-consumer.md` for the corrected assumptions and
   `deploy/README.md` for the apply order.
 - **M3 / M4** (RF collector, end-to-end hardening) — not started.
