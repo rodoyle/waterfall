@@ -471,10 +471,9 @@ fn analysis_worker(
         stats
             .signal_peak_sc16
             .store(pipeline.peak_abs() as u64, Ordering::Relaxed);
-        stats.signal_mean_milli.store(
-            (pipeline.mean_abs() * 1000.0) as u64,
-            Ordering::Relaxed,
-        );
+        stats
+            .signal_mean_milli
+            .store((pipeline.mean_abs() * 1000.0) as u64, Ordering::Relaxed);
 
         for row in outcome.rows {
             Counters::bump(&stats.rows_produced);
