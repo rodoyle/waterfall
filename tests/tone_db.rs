@@ -86,11 +86,18 @@ fn over_udp(datagrams: &[Vec<u8>]) -> Vec<Vec<u8>> {
     received
 }
 
-/// Peak (bin index, dBFS) over the negative-frequency-free half of the row.
+/// Index a positive-frequency baseband tone lands on.
+///
+/// Rows are in natural frequency order (DC at `FFT_SIZE / 2`), so a tone at
+/// passband bin `k` appears at `k + FFT_SIZE / 2`.
+fn tone_index(passband_bin: usize) -> usize {
+    passband_bin + FFT_SIZE / 2
+}
+
+/// Peak (bin index, dBFS) across the row.
 fn peak(bins: &[f32]) -> (usize, f32) {
     bins.iter()
         .enumerate()
-        .take(bins.len() / 2)
         .fold(
             (0usize, f32::MIN),
             |acc, (i, &v)| {
@@ -108,7 +115,6 @@ fn second_peak(bins: &[f32]) -> f32 {
     let (top, _) = peak(bins);
     bins.iter()
         .enumerate()
-        .take(bins.len() / 2)
         .filter(|(i, _)| *i != top)
         .fold(f32::MIN, |acc, (_, &v)| acc.max(v))
 }
@@ -149,7 +155,7 @@ fn a_tone_lands_on_its_expected_bin_at_its_expected_dbfs() {
     assert_eq!(row.bins.len(), FFT_SIZE);
 
     let (bin, dbfs) = peak(&row.bins);
-    assert_eq!(bin, TONE_BIN, "tone bin: 512 -> 250 kHz at 2 MS/s");
+    assert_eq!(bin, tone_index(TONE_BIN), "tone bin: +512 -> +250 kHz at 2 MS/s");
     assert!(
         (dbfs - EXPECTED_DBFS).abs() <= DBFS_TOLERANCE,
         "expected ~{EXPECTED_DBFS} dBFS for amplitude 64 of 127 full scale, got {dbfs}"
@@ -226,13 +232,13 @@ fn reinterpreting_sc16_bytes_as_i8_is_detectably_wrong() {
     }
     let (wrong_bin, wrong_dbfs) = peak(&wrong_bins);
 
-    assert_eq!(correct_bin, TONE_BIN);
+    assert_eq!(correct_bin, tone_index(TONE_BIN));
     assert!(
         (correct_dbfs - EXPECTED_DBFS).abs() <= DBFS_TOLERANCE,
         "correct conversion must hit the expected dBFS"
     );
     assert!(
-        wrong_bin != TONE_BIN || (wrong_dbfs - EXPECTED_DBFS).abs() > 3.0,
+        wrong_bin != tone_index(TONE_BIN) || (wrong_dbfs - EXPECTED_DBFS).abs() > 3.0,
         "misreading sc16 as i8 must not reproduce the tone (bin {wrong_bin}, {wrong_dbfs} dBFS)"
     );
 }
@@ -395,7 +401,7 @@ fn quiet_tones_keep_their_bin_and_level_on_the_sc16_path() {
     let row = row_from(&mut processor, &over_udp(&packets));
 
     let (bin, dbfs) = peak(&row.bins);
-    assert_eq!(bin, TONE_BIN, "quiet tone still lands on its bin");
+    assert_eq!(bin, tone_index(TONE_BIN), "quiet tone still lands on its bin");
 
     // 20*log10(46 / 32767) = -57.06 dBFS against the 16-bit reference.
     let expected = 20.0 * (QUIET_SC16 as f32 / 32767.0).log10();
@@ -431,7 +437,7 @@ fn full_scale_sc16_tone_reads_zero_dbfs() {
 
     let mut processor = PacketProcessor::new(NOMINAL_SAMPLE_RATE);
     let (bin, dbfs) = peak(&row_from(&mut processor, &over_udp(&packets)).bins);
-    assert_eq!(bin, TONE_BIN);
+    assert_eq!(bin, tone_index(TONE_BIN));
     assert!(
         dbfs >= -1.0,
         "a full-scale sc16 tone must read ~0 dBFS (clamped at 0), got {dbfs}"

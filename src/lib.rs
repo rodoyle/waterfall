@@ -358,7 +358,15 @@ pub fn to_db_with_reference(bins: &[Complex<f32>], full_scale: f32) -> Vec<f32> 
 pub struct Row {
     /// Absolute index of this frame's first sample across the whole stream.
     pub sample: u64,
-    /// Per-bin dBFS power (length = fft_size).
+    /// Per-bin dBFS power in NATURAL FREQUENCY ORDER: index 0 is `-sample_rate/2`
+    /// and the last index is just below `+sample_rate/2`, so index `n/2` is DC.
+    ///
+    /// This is the order a spectrum display wants (and the order the front end's
+    /// absolute-frequency axis assumes). A raw forward FFT puts DC at index 0 and
+    /// wraps negative frequencies into the second half, which — rendered linearly
+    /// — draws DC at the lower band edge and mirrors the band, putting every
+    /// carrier 1 MHz off on a 2 MHz span. The rotation happens once here rather
+    /// than in every consumer.
     pub bins: Vec<f32>,
 }
 
@@ -426,9 +434,15 @@ impl StftProcessor {
             let mut window: Vec<Complex<f32>> = self.pending[..self.fft_size].to_vec();
             apply_window(&mut window);
             let _ = self.backend.process(&mut window);
+
+            // Raw FFT order -> natural frequency order (-fs/2 .. +fs/2). See
+            // `Row::bins`: without this the absolute axis is off by fs/2.
+            let mut bins = to_db_with_reference(&window, full_scale);
+            bins.rotate_left(self.fft_size / 2);
+
             out.push(Row {
                 sample: self.next_sample,
-                bins: to_db_with_reference(&window, full_scale),
+                bins,
             });
             // Consume `hop` samples, keeping `fft_size - hop` overlap for the
             // next frame.
@@ -634,7 +648,16 @@ mod tests {
 
         // Reference: batch path.
         let raw = stft(&bytes);
-        let expected_frames: Vec<Vec<f32>> = raw.chunks_exact(FFT_SIZE).map(to_db).collect();
+        let expected_frames: Vec<Vec<f32>> = raw
+            .chunks_exact(FFT_SIZE)
+            .map(to_db)
+            // Row bins are in natural frequency order (see `Row::bins`), so the
+            // raw-FFT reference is rotated to match before comparing.
+            .map(|mut bins| {
+                bins.rotate_left(FFT_SIZE / 2);
+                bins
+            })
+            .collect();
 
         // Incremental: split the byte stream into odd-sized chunks so the
         // carry-over boundary falls mid-frame.
@@ -685,7 +708,9 @@ mod tests {
         let mut proc = StftProcessor::new(fft_size, hop);
         let rows = proc.push_bytes(&bytes);
         assert!(!rows.is_empty());
-        let bin_index = (freq_hz * fft_size as f32 / sample_rate).round() as usize;
+        // Rows are in natural frequency order: DC sits at fft_size/2, so a
+        // positive-frequency tone at `bin_index` appears at bin_index + n/2.
+        let bin_index = (freq_hz * fft_size as f32 / sample_rate).round() as usize + fft_size / 2;
         let first = &rows[0].bins;
         let search_radius = 2;
         let start = bin_index.saturating_sub(search_radius);

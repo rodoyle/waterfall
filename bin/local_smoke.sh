@@ -91,21 +91,28 @@ if rows:
     spread = max(bins) - min(bins)
     check("intensity is non-flat (>20 dB spread)", spread > 20.0, f"{spread:.1f} dB")
 
-    half = bins[: fft_size // 2]
-    peak_bin = max(range(len(half)), key=lambda i: half[i])
-    peak_dbfs = half[peak_bin]
-    check(f"peak bin == {tone_bin}", peak_bin == tone_bin, f"got {peak_bin}")
+    # Rows are in natural frequency order: DC sits at fft_size/2, so a
+    # positive-frequency tone at passband bin k appears at k + fft_size/2.
+    peak_bin = max(range(len(bins)), key=lambda i: bins[i])
+    peak_dbfs = bins[peak_bin]
+    expected_bin = tone_bin + fft_size // 2
+    check(
+        f"peak bin == {expected_bin} (+{tone_bin} passband)",
+        peak_bin == expected_bin,
+        f"got {peak_bin}",
+    )
     expected_dbfs = 20.0 * math.log10(16384 / 32767.0)
     check(
         f"peak dBFS ~= {expected_dbfs:.2f} (amp 16384 of 32767 sc16 full scale)",
         abs(peak_dbfs - expected_dbfs) <= 1.5,
         f"got {peak_dbfs:.2f}",
     )
-    # 512 * (2e6 / 4096) = 250 kHz
+    # 512 * (2e6 / 4096) = 250 kHz above the centre frequency.
+    offset_hz = (peak_bin - fft_size // 2) * 2_000_000 / fft_size
     check(
-        "peak bin == 250 kHz",
-        abs(peak_bin * 2_000_000 / fft_size - 250_000) < 1.0,
-        f"{peak_bin * 2_000_000 / fft_size / 1e3:.1f} kHz",
+        "peak sits +250 kHz from the centre",
+        abs(offset_hz - 250_000) < 1.0,
+        f"{offset_hz / 1e3:+.1f} kHz",
     )
 
 consumer = get(stats_port, "/stats")
