@@ -58,6 +58,9 @@ spec:
             # Spike the first 3 datagrams to the log on every pod start, so the
             # transport is proven before trusting the parser.
             - --hexdump-first=3
+            # Capture one real sigproc datagram for the committed test fixture
+            # (retrieved with `kubectl exec ... -- cat`).
+            - --capture-fixture=/tmp/sigproc-datagram.bin
           ports:
             - name: vita49
               containerPort: 4820

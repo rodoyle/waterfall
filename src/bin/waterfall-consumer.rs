@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use waterfall::cli;
 use waterfall::consumer::PacketProcessor;
 use waterfall::publish::{IngestMeta, IngestRequest, RowBatch, RowDto};
 use waterfall::vita49::{self, GapTracker, ParseError, NOMINAL_COMPLEX_SAMPLES};
@@ -118,18 +119,6 @@ struct Config {
     capture_fixture: Option<String>,
 }
 
-fn arg_value(args: &[String], flag: &str) -> Option<String> {
-    args.iter()
-        .position(|a| a == flag)
-        .and_then(|i| args.get(i + 1).cloned())
-}
-
-fn arg_parse<T: std::str::FromStr>(args: &[String], flag: &str, default: T) -> T {
-    arg_value(args, flag)
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
 fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
     std::env::var(key)
         .ok()
@@ -139,29 +128,52 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 
 fn load_config() -> Config {
     let args: Vec<String> = std::env::args().collect();
+
+    // Both `--flag value` and `--flag=value` are accepted (see waterfall::cli);
+    // the manifests use the equals form, and silently ignoring a flag must not
+    // be possible in a deployed path.
+    const KNOWN: &[&str] = &[
+        "--listen",
+        "--bridge-url",
+        "--sample-rate",
+        "--center-freq",
+        "--publish-hz",
+        "--stats-listen",
+        "--rcvbuf",
+        "--hexdump-first",
+        "--capture-fixture",
+    ];
+    let unknown = cli::unknown_flags(&args, KNOWN);
+    if !unknown.is_empty() {
+        eprintln!(
+            "waterfall-consumer: ignoring unrecognized flag(s): {}",
+            unknown.join(", ")
+        );
+    }
+
     Config {
         listen: env_parse(
             "WATERFALL_CONSUMER_LISTEN",
-            arg_parse(&args, "--listen", "0.0.0.0:4820".to_string()),
+            cli::parse_or(&args, "--listen", "0.0.0.0:4820".to_string()),
         )
         .parse()
         .expect("invalid --listen address"),
         bridge_url: std::env::var("WATERFALL_BRIDGE_URL").unwrap_or_else(|_| {
-            arg_parse(
+            cli::parse_or(
                 &args,
                 "--bridge-url",
                 "http://waterfall-ui.default.svc.cluster.local:4780".to_string(),
             )
         }),
-        sample_rate: arg_parse(&args, "--sample-rate", 2_000_000.0_f64),
-        center_hz: arg_parse(&args, "--center-freq", 915_000_000.0_f64),
-        publish_hz: arg_parse(&args, "--publish-hz", 30.0_f64),
-        stats_listen: arg_parse(&args, "--stats-listen", "0.0.0.0:4830".to_string())
+        sample_rate: cli::parse_or(&args, "--sample-rate", 2_000_000.0_f64),
+        center_hz: cli::parse_or(&args, "--center-freq", 915_000_000.0_f64),
+        publish_hz: cli::parse_or(&args, "--publish-hz", 30.0_f64),
+        stats_listen: cli::parse_or(&args, "--stats-listen", "0.0.0.0:4830".to_string())
             .parse()
             .expect("invalid --stats-listen address"),
-        rcvbuf: arg_parse(&args, "--rcvbuf", 8 * 1024 * 1024_usize),
-        hexdump_first: arg_parse(&args, "--hexdump-first", 0_u64),
-        capture_fixture: arg_value(&args, "--capture-fixture"),
+        rcvbuf: cli::parse_or(&args, "--rcvbuf", 8 * 1024 * 1024_usize),
+        hexdump_first: cli::parse_or(&args, "--hexdump-first", 0_u64),
+        capture_fixture: cli::flag_value(&args, "--capture-fixture"),
     }
 }
 

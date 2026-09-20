@@ -42,6 +42,7 @@ use std::{
     time::{Duration, SystemTime},
 };
 use tower_http::services::ServeDir;
+use waterfall::cli;
 use waterfall::publish::IngestRequest;
 use waterfall::{complex_vec_to_bytes, StftProcessor, HOP_SIZE};
 
@@ -366,27 +367,35 @@ fn engine_loop(st: Arc<AppState>, sweep_ms: u64, center_hz: f64, sample_rate_hz:
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let flag = |name: &str| -> Option<String> {
-        args.iter()
-            .position(|a| a == name)
-            .and_then(|i| args.get(i + 1).cloned())
-    };
+
+    // Both `--flag value` and `--flag=value` are accepted (see waterfall::cli).
+    // The equals form matters: a Deployment once passed `--source=ingest`, this
+    // parser only matched the spaced form, and the bridge silently came up in
+    // synthetic mode. Unrecognized flags are reported instead of ignored.
+    const KNOWN: &[&str] = &[
+        "--source",
+        "--static",
+        "--sweep-ms",
+        "--center-freq",
+        "--sample-rate",
+    ];
+    let unknown = cli::unknown_flags(&args, KNOWN);
+    if !unknown.is_empty() {
+        eprintln!(
+            "waterfall bridge: ignoring unrecognized flag(s): {}",
+            unknown.join(", ")
+        );
+    }
 
     let listen = std::env::var("WATERFALL_LISTEN").unwrap_or_else(|_| "127.0.0.1:4780".into());
-    let static_dir = flag("--static").unwrap_or_else(|| ".".into());
-    let sweep_ms: u64 = flag("--sweep-ms")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(60);
+    let static_dir = cli::flag_value(&args, "--static").unwrap_or_else(|| ".".into());
+    let sweep_ms: u64 = cli::parse_or(&args, "--sweep-ms", 60_u64);
     let source = std::env::var("WATERFALL_SOURCE")
         .ok()
-        .or_else(|| flag("--source"))
+        .or_else(|| cli::flag_value(&args, "--source"))
         .unwrap_or_else(|| "synthetic".into());
-    let center_hz: f64 = flag("--center-freq")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(915_000_000.0);
-    let sample_rate_hz: f64 = flag("--sample-rate")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2_000_000.0);
+    let center_hz: f64 = cli::parse_or(&args, "--center-freq", 915_000_000.0_f64);
+    let sample_rate_hz: f64 = cli::parse_or(&args, "--sample-rate", 2_000_000.0_f64);
 
     let configured_source: &'static str = match source.as_str() {
         "ingest" | "vita49" => "ingest",
@@ -411,7 +420,6 @@ async fn main() {
              NO synthetic fallback (a dead feed reports stale, it does not fabricate rows)"
         );
     }
-
     let addr: SocketAddr = listen.parse().expect("invalid WATERFALL_LISTEN address");
     println!(
         "waterfall bridge: http://{addr}  (static: {static_dir}, centre {:.0} Hz, {:.0} Hz sample rate)",
