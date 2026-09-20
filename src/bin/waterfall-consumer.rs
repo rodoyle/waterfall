@@ -174,7 +174,10 @@ fn load_config() -> Config {
 /// packet loss, the effective value is read back and surfaced rather than
 /// assumed — an 8 MB buffer is what keeps ~977 pkt/s of 8212-byte datagrams from
 /// overflowing.
-async fn bind_receive_socket(cfg: &Config, stats: &Arc<Counters>) -> std::io::Result<tokio::net::UdpSocket> {
+async fn bind_receive_socket(
+    cfg: &Config,
+    stats: &Arc<Counters>,
+) -> std::io::Result<tokio::net::UdpSocket> {
     let socket = socket2::Socket::new(
         socket2::Domain::IPV4,
         socket2::Type::DGRAM,
@@ -223,10 +226,16 @@ fn spike_inspect(n: u64, datagram: &[u8], cfg: &Config) {
     let h = vita49::parse_header(header);
 
     let shown = datagram.len().min(64);
-    let hex: Vec<String> = datagram[..shown].iter().map(|b| format!("{b:02x}")).collect();
+    let hex: Vec<String> = datagram[..shown]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let tail_start = datagram.len().saturating_sub(16);
     let tail: Vec<String> = if datagram.len() > shown {
-        datagram[tail_start..].iter().map(|b| format!("{b:02x}")).collect()
+        datagram[tail_start..]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     } else {
         Vec::new()
     };
@@ -443,11 +452,7 @@ fn analysis_worker(
 
 // ---------------- Publisher ----------------
 
-async fn publish_loop(
-    batch: Arc<Mutex<RowBatch>>,
-    stats: Arc<Counters>,
-    cfg: Arc<Config>,
-) {
+async fn publish_loop(batch: Arc<Mutex<RowBatch>>, stats: Arc<Counters>, cfg: Arc<Config>) {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
@@ -494,7 +499,9 @@ async fn publish_loop(
             }
             Ok(response) => {
                 stats.bridge_errors.fetch_add(1, Ordering::Relaxed);
-                stats.rows_lost_to_bridge.fetch_add(count, Ordering::Relaxed);
+                stats
+                    .rows_lost_to_bridge
+                    .fetch_add(count, Ordering::Relaxed);
                 let errors = stats.bridge_errors.load(Ordering::Relaxed);
                 if errors <= 5 || errors.is_multiple_of(60) {
                     eprintln!(
@@ -507,7 +514,9 @@ async fn publish_loop(
             }
             Err(e) => {
                 stats.bridge_errors.fetch_add(1, Ordering::Relaxed);
-                stats.rows_lost_to_bridge.fetch_add(count, Ordering::Relaxed);
+                stats
+                    .rows_lost_to_bridge
+                    .fetch_add(count, Ordering::Relaxed);
                 let errors = stats.bridge_errors.load(Ordering::Relaxed);
                 if errors <= 5 || errors.is_multiple_of(60) {
                     eprintln!("waterfall-consumer: bridge POST failed: {e} (errors={errors})");
@@ -660,7 +669,12 @@ async fn main() {
     let listener = tokio::net::TcpListener::bind(cfg.stats_listen)
         .await
         .expect("failed to bind stats listener");
-    println!("waterfall-consumer: stats on http://{}/stats", cfg.stats_listen);
+    println!(
+        "waterfall-consumer: stats on http://{}/stats",
+        cfg.stats_listen
+    );
 
-    axum::serve(listener, app).await.expect("stats server error");
+    axum::serve(listener, app)
+        .await
+        .expect("stats server error");
 }

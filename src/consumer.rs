@@ -4,7 +4,7 @@
 //! `src/bin/waterfall-consumer.rs`; everything that decides *what a datagram
 //! means* lives here so an integration test can drive it over a real UDP socket.
 
-use crate::vita49::{self, ParseError, Packet};
+use crate::vita49::{self, Packet, ParseError};
 use crate::{Row, StftProcessor, FFT_SIZE, HOP_SIZE};
 
 /// What one datagram produced.
@@ -105,7 +105,8 @@ mod tests {
     use crate::vita49::{GapTracker, NOMINAL_COMPLEX_SAMPLES, NOMINAL_SAMPLE_RATE};
 
     /// Minimal independent packet builder (mirrors the corrected sigproc framing).
-    fn packet(ts_int: u32, ts_frac: u64, samples: &[(i16, i16)]) -> Vec<u8> {        let total_words = 5 + samples.len();
+    fn packet(ts_int: u32, ts_frac: u64, samples: &[(i16, i16)]) -> Vec<u8> {
+        let total_words = 5 + samples.len();
         let mut buf = vec![0u8; total_words * 4];
         let header = 0x10D0_0000u32 | (total_words as u32 - 1);
         buf[0..4].copy_from_slice(&header.to_be_bytes());

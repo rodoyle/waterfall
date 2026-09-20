@@ -129,7 +129,10 @@ impl std::fmt::Display for ParseError {
                 write!(f, "datagram too short: {len} bytes, need at least {need}")
             }
             ParseError::UnsupportedPacketType(t) => {
-                write!(f, "unsupported VITA49 packet type 0x{t:x} (expected IF Data 0x1)")
+                write!(
+                    f,
+                    "unsupported VITA49 packet type 0x{t:x} (expected IF Data 0x1)"
+                )
             }
             ParseError::UnsupportedTrailer => {
                 write!(f, "VITA49 trailer bit set; payload trailer not supported")
@@ -437,7 +440,10 @@ mod tests {
 
         let pkt = parse_datagram(&buf).expect("legacy datagram still parses");
         assert_eq!(pkt.header.size_words, 4100);
-        assert!(!pkt.size_field_matches, "declared 16404 bytes, delivered 8202");
+        assert!(
+            !pkt.size_field_matches,
+            "declared 16404 bytes, delivered 8202"
+        );
         assert_eq!(pkt.payload.len(), 8180, "whole words only");
         assert_eq!(pkt.complex_samples(), 2045);
         assert_eq!(pkt.trailing_bytes, 2);
@@ -449,7 +455,13 @@ mod tests {
         for len in 0..MIN_DATAGRAM_BYTES {
             let buf = vec![0u8; len];
             let err = parse_datagram(&buf).expect_err("must reject");
-            assert_eq!(err, ParseError::TooShort { len, need: MIN_DATAGRAM_BYTES });
+            assert_eq!(
+                err,
+                ParseError::TooShort {
+                    len,
+                    need: MIN_DATAGRAM_BYTES
+                }
+            );
         }
 
         // 27 bytes was the plan's "reject" threshold for a 28-byte header; the

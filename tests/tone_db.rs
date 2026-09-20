@@ -91,13 +91,16 @@ fn peak(bins: &[f32]) -> (usize, f32) {
     bins.iter()
         .enumerate()
         .take(bins.len() / 2)
-        .fold((0usize, f32::MIN), |acc, (i, &v)| {
-            if v > acc.1 {
-                (i, v)
-            } else {
-                acc
-            }
-        })
+        .fold(
+            (0usize, f32::MIN),
+            |acc, (i, &v)| {
+                if v > acc.1 {
+                    (i, v)
+                } else {
+                    acc
+                }
+            },
+        )
 }
 
 /// Second-highest bin, used to prove the energy really is concentrated.

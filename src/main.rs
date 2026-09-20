@@ -144,7 +144,19 @@ struct IngestAck {
     ring_len: usize,
 }
 
-fn source_meta(state: &AppState) -> (String, f64, f64, usize, Option<u128>, bool, u64, u64, Option<waterfall::publish::IngestMeta>) {
+fn source_meta(
+    state: &AppState,
+) -> (
+    String,
+    f64,
+    f64,
+    usize,
+    Option<u128>,
+    bool,
+    u64,
+    u64,
+    Option<waterfall::publish::IngestMeta>,
+) {
     let p = state.producer.lock().unwrap();
     let stale_ms = p.last_row_at.and_then(|t| {
         SystemTime::now()
@@ -286,7 +298,10 @@ async fn chunks_handler(
     let time = q.time.unwrap_or(0);
     let size = q.size.unwrap_or(128).min(MAX_CHUNKS);
     let ring = st.ring.lock().unwrap();
-    let start = ring.iter().position(|e| e.samples >= time).unwrap_or(ring.len());
+    let start = ring
+        .iter()
+        .position(|e| e.samples >= time)
+        .unwrap_or(ring.len());
     let rows: Vec<_> = ring.iter().skip(start).take(size).cloned().collect();
     Json(rows)
 }
@@ -403,6 +418,8 @@ async fn main() {
         center_hz, sample_rate_hz
     );
     let router = app(state, &static_dir);
-    let listener = tokio::net::TcpListener::bind(addr).await.expect("bind failed");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .expect("bind failed");
     axum::serve(listener, router).await.expect("server error");
 }
