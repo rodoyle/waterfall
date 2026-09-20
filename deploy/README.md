@@ -98,15 +98,33 @@ dropped in favour of that cluster-level configuration.
 
 ## Operational notes
 
+- **Node placement.** The workloads are constrained to `amd64` and away from
+  `rpi-four-2`/`sab-laptop-1`, with a *soft* preference for `med-laptop-2`.
+  That preference exists because on 2026-09-20 `med-laptop-1` was flapping
+  (`NodeNotReady` <-> `NodeReady` roughly once a minute) and every stall dropped
+  live datagrams: the consumer held a steady 976.5 pkt/s with `gaps = 0` while
+  the node was healthy, then accumulated tens of thousands of missing samples.
+  After relocation to `med-laptop-2` it held 976.6 pkt/s with `gaps = 0` across
+  repeated 60 s+ observations. The infra agent may replace the soft preference
+  with node labels/taints.
 - **SO_RCVBUF.** The consumer asks for 8 MiB and logs what the kernel granted.
-  Linux caps it at `net.core.rmem_max` (commonly 212992) and the effective value
-  is reported in the pod log and `/stats`. A small buffer shows up as phantom
-  loss (fragments discarded under load), so check the reported number. Raising it
-  needs an unsafe sysctl (`net.core.rmem_max`) via the kubelet allowlist — a
-  cluster-level change, deliberately not baked into these manifests.
+  On this cluster the grant is 425984 bytes (~50 ms of the live ~8 MB/s stream)
+  because `net.core.rmem_max` defaults to 212992. Two in-repo attempts to raise
+  it both fail: `securityContext.sysctls` passes API validation but the kubelet
+  rejects it with `SysctlForbidden`, and a privileged initContainer cannot write
+  `/proc/sys/net` in this runtime. The cluster-level remedy is
+  `kubelet --allowed-unsafe-sysctls=net.core.rmem_max` (infra agent).
+  Measured impact of leaving it capped: none in steady state (976.6 pkt/s,
+  `gaps = 0`, `stft_dropped = 0`); it is robustness margin for node stalls.
 - **No synthetic fallback.** The bridge runs `--source=ingest`. If the RF feed
   stops, `/meta` reports `stale: true`, the rows stop, and the UI readout turns
-  red. A waterfall that fabricates rows is worse than one that admits it is dead.
+  red. Verified by scaling the consumer to 0: `stale` became true and
+  `rows_ingested` stayed frozen (470132 across two readings) — the bridge never
+  invents rows. A waterfall that fabricates rows is worse than one that admits
+  it is dead.
+- **Live signal level.** Peak |sc16| measured between 46 and 7837 with mean
+  ~10-12, i.e. mostly below the 8-bit LSB of 256. That is why the RF path keeps
+  full 16-bit resolution (see `docs/plans/vita49-consumer.md`).
 - **Drop counters, not guesses.** `/stats` on the consumer separates
   `parse_errors`, `stft_dropped` (analysis queue full — the socket is never
   blocked), `publish_dropped` (pacing buffer latest-wins) and

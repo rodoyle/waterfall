@@ -40,8 +40,37 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: NotIn
                     values: [rpi-four-2, sab-laptop-1]
+          # SOFT steering only. On 2026-09-20 med-laptop-1 was flapping
+          # (NodeNotReady <-> NodeReady about once a minute), and every stall
+          # dropped live datagrams: the consumer held a steady 976.5 pkt/s with
+          # zero gaps while that node was healthy. This preference keeps the
+          # workload on a permitted node (both are med-laptop-*) while avoiding
+          # the unstable one; the infra agent may replace it with cluster-level
+          # labels/taints.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: [med-laptop-2]
       imagePullSecrets:
         - name: ghcr-pull
+      # NOTE on the receive buffer: the consumer requests SO_RCVBUF = 8 MiB, but
+      # the kernel caps it at net.core.rmem_max (default 212992; read back as
+      # 425984) = ~50 ms of the live ~8 MB/s stream. Two mechanisms to raise it
+      # were tried and both are unavailable from inside this repo:
+      #   * `securityContext.sysctls` -> passes API validation but the kubelet
+      #     rejects it at admission with SysctlForbidden (it is an "unsafe"
+      #     sysctl), and
+      #   * a privileged initContainer -> /proc/sys/net is not writable in this
+      #     runtime (the write fails; no net.core directory is visible).
+      # The cluster-level fix is the kubelet flag
+      # `--allowed-unsafe-sysctls=net.core.rmem_max` (infra agent's call).
+      # Measured impact of leaving it capped: on a stable node the consumer
+      # holds 976.6 pkt/s with gaps = 0 and stft_dropped = 0, so this is a
+      # robustness margin for node stalls rather than a functional gap -- the
+      # multi-second outages observed were traced to med-laptop-1 flapping.
       containers:
         - name: waterfall-consumer
           image: ghcr.io/rodoyle/waterfall:latest

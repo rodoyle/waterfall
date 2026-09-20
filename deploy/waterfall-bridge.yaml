@@ -35,6 +35,16 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: NotIn
                     values: [rpi-four-2, sab-laptop-1]
+          # Soft steering away from the flapping med-laptop-1 (see
+          # waterfall-consumer.yaml for the evidence). Replaceable by
+          # cluster-level labels/taints owned by the infra agent.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: [med-laptop-2]
       imagePullSecrets:
         - name: ghcr-pull
       containers:

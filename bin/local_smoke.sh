@@ -95,9 +95,9 @@ if rows:
     peak_bin = max(range(len(half)), key=lambda i: half[i])
     peak_dbfs = half[peak_bin]
     check(f"peak bin == {tone_bin}", peak_bin == tone_bin, f"got {peak_bin}")
-    expected_dbfs = 20.0 * math.log10(64 / 127.0)
+    expected_dbfs = 20.0 * math.log10(16384 / 32767.0)
     check(
-        f"peak dBFS ~= {expected_dbfs:.2f} (amp 64 of 127)",
+        f"peak dBFS ~= {expected_dbfs:.2f} (amp 16384 of 32767 sc16 full scale)",
         abs(peak_dbfs - expected_dbfs) <= 1.5,
         f"got {peak_dbfs:.2f}",
     )
@@ -123,6 +123,7 @@ check("rows produced", consumer["rows_produced"] > 0, str(consumer["rows_produce
 check("rows published to bridge", consumer["rows_published"] > 0, str(consumer["rows_published"]))
 check("no bridge errors", consumer["bridge_errors"] == 0, str(consumer["bridge_errors"]))
 check("SO_RCVBUF granted", consumer["rcvbuf_bytes"] > 0, str(consumer["rcvbuf_bytes"]))
+check("signal level reported", consumer["signal_peak_sc16"] > 0, str(consumer["signal_peak_sc16"]))
 
 print()
 if failures:
