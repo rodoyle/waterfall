@@ -114,7 +114,7 @@ function renderPlot() {
     console.log("Rendering plot..."); // Log entry point
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const padLeft = 70, padRight = 30, padTop = 40, padBottom = 55;
+    const padLeft = 90, padRight = 30, padTop = 40, padBottom = 92;
     const plotW = canvas.width - padLeft - padRight;
     const plotH = canvas.height - padTop - padBottom;
 
@@ -134,19 +134,24 @@ function renderPlot() {
     }
 
 
-    // Axes.
+    // Axes. NOTE ON ORIENTATION: a sweep is written as one PIXEL ROW spanning
+    // the canvas width and `appendSweep` scrolls those rows upward, so bins run
+    // along X and time runs down Y. The frequency labels therefore belong on the
+    // bottom edge and the time label on the left edge -- an earlier revision had
+    // them the other way round, which made a constant carrier (the DC spur at
+    // band centre) appear as a vertical line with MHz labels down the side.
     ctx.strokeStyle = 'rgba(0,0,0,0.6)';
     ctx.lineWidth = 1;
     ctx.strokeRect(padLeft, padTop, plotW, plotH);
 
-    // Frequency labels (y axis). On a live RF stream these are absolute MHz
-    // (axis.js); on the synthetic baseband feed they stay relative Hz. Log
-    // spacing only applies to the relative axis — a log scale across a 2 MHz
-    // window around 915 MHz would be meaningless.
+    // Frequency labels (x axis): absolute MHz on a live RF stream (axis.js),
+    // relative Hz on the synthetic baseband feed. Log spacing only applies to
+    // the relative axis - a log scale across a 2 MHz window around 915 MHz
+    // would be meaningless.
     ctx.fillStyle = '#222';
     ctx.font = '12px sans-serif';
-    ctx.textAlign = 'right';
-    ctx.textBaseline = 'middle';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
     const fLo = Math.max(1, config.freqMin); // log(0) is -inf; clamp floor
     const fHi = Math.max(fLo + 1, config.freqMax);
     const useLog = config.freqScale === 'log' && !config.absoluteAxis;
@@ -156,15 +161,17 @@ function renderPlot() {
             // log-space between fLo and fHi
             const t = i / 4;
             f = fLo * (fHi / fLo) ** t;
-            if (i === 0) f = config.freqMin; // anchor the bottom edge exactly
+            if (i === 0) f = config.freqMin; // anchor the left edge exactly
         } else {
             f = config.freqMin + (config.freqMax - config.freqMin) * i / 4;
         }
-        const y = padTop + plotH - (plotH * i / 4);
+        const x = padLeft + (plotW * i / 4);
         const label = config.absoluteAxis
             ? WaterfallAxis.formatHzLabel(f)
             : `${f.toFixed(f >= 1000 ? 0 : 1)} Hz`;
-        ctx.fillText(label, padLeft - 8, y);
+        ctx.fillText(label, x, padTop + plotH + 8);
+        // Tick mark so the label reads as an axis, not a caption.
+        ctx.fillRect(x, padTop + plotH, 1, 4);
     }
 
     // Band annotation: on a live RF stream state the centre and span so the
@@ -180,13 +187,18 @@ function renderPlot() {
         );
     }
 
-    // Time label (x axis).
+    // Time label (y axis): rotated 90 degrees on the left edge, where time
+    // actually advances.
+    ctx.save();
+    ctx.translate(14, padTop + plotH / 2);
+    ctx.rotate(-Math.PI / 2);
     ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText(`Time  (sweeps: ${rowOffset}, ${config.status})`, padLeft + plotW / 2, padTop + plotH + 10);
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`Time ↑ (newest last, sweeps: ${rowOffset}, ${config.status})`, 0, 0);
+    ctx.restore();
 
-    // Color bar: horizontal strip under the plot, gradient left (min) to right (max).
-    const barH = 12, barY = padTop + plotH + 28, barPad = 8;
+    // Color bar: horizontal strip under the frequency labels.
+    const barH = 12, barY = padTop + plotH + 34, barPad = 8;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'alphabetic';
     const barW = plotW / 2;
