@@ -25,8 +25,8 @@ the Rust crate, the binaries and the image stay **waterfall**
 |---|---|
 | `kustomize/build/` | kaniko Job (amd64 builder) → pushes `ghcr.io/rodoyle/waterfall:latest` |
 | `kustomize/base/` | canonical Deployments + Services + Ingress |
-| `kustomize/overlays/default/` | namespace, image tag — the app deploy root |
-| `kustomize/compat/` | the legacy `waterfall-service`, frozen; applied separately |
+| `kustomize/overlays/default/` | namespace, image tag — the single app deploy root (includes the compat Service) |
+| `kustomize/compat/` | the legacy `waterfall-service`, frozen; included by the overlay and applicable standalone |
 | `Dockerfile` | the image the kaniko Job builds (referenced as `deploy/Dockerfile`) |
 
 ## Deploy
@@ -37,10 +37,12 @@ kubectl delete job kaniko-build-waterfall -n build --ignore-not-found
 kubectl apply -k deploy/kustomize/build
 kubectl -n build logs job/kaniko-build-waterfall -f
 
-# 2. Apply the canonical stack.
+# 2. Apply the whole stack — canonical objects AND the frozen legacy Service,
+#    in one reproducible path (six objects):
 kubectl apply -k deploy/kustomize/overlays/default
 
-# 3. Re-assert the frozen legacy Service (a no-op; see below).
+# Optional: re-assert only the legacy Service, without touching the canonical
+# objects (a no-op against the live cluster):
 kubectl apply -k deploy/kustomize/compat
 ```
 
@@ -72,7 +74,9 @@ forever; it retries only while unresolved. It cached `10.43.78.205`. So:
    and roll the Deployment (a brief RF gap; their call).
 2. Confirm sigproc logs `resolved to … orbweaver-service` and its drop counter
    stops rising.
-3. Delete the compat root: `kubectl delete -k deploy/kustomize/compat`.
+3. Delete the compat resource: drop `../../compat/waterfall-service.yaml` from
+   `kustomize/overlays/default/kustomization.yaml`, then
+   `kubectl delete -k deploy/kustomize/compat`.
 4. Drop the `app: waterfall-consumer` label from `kustomize/base/consumer.yaml`
    and re-apply the overlay.
 5. Delete `kustomize/compat/` from the repo.

@@ -3,9 +3,19 @@ kind: Kustomization
 # The one deployed environment: namespace `default`, image tag `latest` (the tag
 # this repo's kaniko Job pushes). Pin a digest here instead if a frozen rollout
 # is ever required.
+#
+# `kubectl apply -k deploy/kustomize/overlays/default` is the SINGLE deploy path
+# for the whole stack. It includes the frozen legacy Service from ../../compat,
+# which is what sigproc resolves: keeping it in this overlay means one apply
+# reconciles everything, and the file stays separate so it can be re-asserted on
+# its own (`kubectl apply -k deploy/kustomize/compat`) without touching the
+# canonical objects. Applying it is a no-op against the live cluster.
 namespace: default
 resources:
   - ../../base
+  # Directory reference, not the bare file: kustomize's load restrictor rejects
+  # raw resources outside the overlay root, but a nested kustomization is fine.
+  - ../../compat
 images:
   - name: ghcr.io/rodoyle/waterfall
     newTag: latest
