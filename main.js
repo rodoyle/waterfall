@@ -51,6 +51,15 @@ onResize(); // Initial resize
 
 console.log("Waterfall Plot Visualizer frontend started.");
 
+/// A row representing "no data yet".
+///
+/// Filled with the dBFS FLOOR, not zero: 0 dBFS is full scale, so seeding with
+/// zeros painted a saturated red block behind the live data until enough sweeps
+/// had arrived to scroll it away. The floor renders as a cold, empty row.
+function emptySweep() {
+    return new Float32Array(config.numBins).fill(config.intensityMin);
+}
+
 // Generate one sweep: an array of `numBins` intensity values.
 // Random on-the-fly generation; only used while `config.demo` is true (i.e.
 // until the bridge server delivers a real STFT sweep).
@@ -327,7 +336,7 @@ function applyGeometry() {
     plotCanvas.height = config.numRows;
     rowOffset = 0;
     for (let i = 0; i < config.numRows; i++) {
-        appendSweep(new Float32Array(config.numBins));
+        appendSweep(emptySweep());
     }
     // The live client downsamples server bins to `numBins`; recreate it so the
     // new width takes effect for incoming sweeps.
@@ -422,7 +431,7 @@ function syncDbInputs() {
 // DOMContentLoaded so `axis.js` (a module) is loaded first.
 function bootFrontend() {
     for (let i = 0; i < config.numRows; i++) {
-        appendSweep(new Float32Array(config.numBins));
+        appendSweep(emptySweep());
     }
     renderPlot();
 

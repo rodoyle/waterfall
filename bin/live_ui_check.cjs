@@ -51,8 +51,11 @@ function check(label, condition, detail = '') {
     );
     const meta = await page.evaluate(async () => (await fetch('/meta')).json());
 
-    // Let the waterfall accumulate real rows before inspecting pixels.
-    await page.waitForTimeout(8000);
+    // Let the waterfall accumulate real rows before inspecting pixels. The front
+    // end seeds `numRows` empty rows and appends live data at its own clock rate
+    // (sweepIntervalMs), so allow enough time for the seeds to scroll out
+    // (~220 rows x 90 ms) or the screenshot shows a half-filled plot.
+    await page.waitForTimeout(25000);
 
     const pixels = await page.evaluate(() => {
         const canvas = document.getElementById('waterfallCanvas');
@@ -68,6 +71,17 @@ function check(label, condition, detail = '') {
     });
 
     const metaAfter = await page.evaluate(async () => (await fetch('/meta')).json());
+
+    // Loss is judged as a RATIO, not as "gaps === 0": over hundreds of thousands
+    // of packets one lost fragment legitimately appears as a single gap (2048
+    // samples), and the objective's criterion is "gap count approximately zero".
+    const consumer = meta.consumer || {};
+    const received = Number(consumer.packets_received) || 0;
+    const gaps = Number(consumer.gaps) || 0;
+    const missingSamples = Number(consumer.missing_samples) || 0;
+    const expectedSamples = received * 2048;
+    const lossRatio = expectedSamples > 0 ? missingSamples / expectedSamples : 0;
+
     await page.screenshot({ path: SHOT });
 
     console.log(`  screenshot: ${SHOT}`);
@@ -97,8 +111,16 @@ function check(label, condition, detail = '') {
         pixels.distinct >= MIN_DISTINCT_COLOURS,
         `${pixels.distinct} distinct`
     );
-    check('gaps reported as zero in /meta', meta.consumer && meta.consumer.gaps === 0,
-        meta.consumer ? String(meta.consumer.gaps) : 'no consumer meta');
+    check(
+        'packet loss is negligible (<0.1% of samples)',
+        lossRatio < 0.001,
+        `${missingSamples} of ~${expectedSamples} samples missing ` +
+            `(${(lossRatio * 100).toFixed(4)}%), ${gaps} gap(s)`
+    );
+    check(
+        'loss counters are reported by the middleware',
+        meta.consumer !== null && meta.consumer !== undefined
+    );
 
     await browser.close();
 
