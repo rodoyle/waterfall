@@ -19,7 +19,7 @@
 
 use std::net::UdpSocket;
 use waterfall::consumer::PacketProcessor;
-use waterfall::vita49::{parse_datagram, NOMINAL_COMPLEX_SAMPLES, NOMINAL_SAMPLE_RATE};
+use waterfall::vita49::{parse_datagram, GapTracker, NOMINAL_COMPLEX_SAMPLES, NOMINAL_SAMPLE_RATE};
 use waterfall::{StftProcessor, FFT_SIZE, HOP_SIZE};
 
 /// Passband bin of the test tone: 512 * (2e6 / 4096) = 250 kHz.
@@ -244,11 +244,15 @@ fn a_socket_level_timestamp_jump_is_reported_as_a_gap() {
     ];
 
     let mut processor = PacketProcessor::new(NOMINAL_SAMPLE_RATE);
+    // Wire-loss accounting is receive-side (see consumer.rs), so the test drives
+    // the same GapTracker the receive loop owns, on the same counters.
+    let mut tracker = GapTracker::new(NOMINAL_COMPLEX_SAMPLES as u64);
     let mut gaps = 0;
     let mut missing = 0;
     for datagram in over_udp(&packets) {
         let outcome = processor.observe(&datagram);
-        if let Some(gap) = outcome.gap {
+        assert!(outcome.parse_error.is_none());
+        if let Some(gap) = tracker.observe(outcome.sample_counter, outcome.complex_samples as u64) {
             gaps += 1;
             missing += gap.missing_samples;
         }
@@ -256,6 +260,6 @@ fn a_socket_level_timestamp_jump_is_reported_as_a_gap() {
 
     assert_eq!(gaps, 1, "exactly one discontinuity");
     assert_eq!(missing, 2048 * 3, "three packets' worth of samples missing");
-    assert_eq!(processor.gaps(), 1);
-    assert_eq!(processor.missing_samples(), 2048 * 3);
+    assert_eq!(tracker.gaps, 1);
+    assert_eq!(tracker.missing_samples, 2048 * 3);
 }

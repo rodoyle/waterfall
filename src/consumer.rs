@@ -4,7 +4,7 @@
 //! `src/bin/waterfall-consumer.rs`; everything that decides *what a datagram
 //! means* lives here so an integration test can drive it over a real UDP socket.
 
-use crate::vita49::{self, Gap, GapTracker, ParseError, Packet, NOMINAL_COMPLEX_SAMPLES};
+use crate::vita49::{self, ParseError, Packet};
 use crate::{Row, StftProcessor, FFT_SIZE, HOP_SIZE};
 
 /// What one datagram produced.
@@ -12,8 +12,6 @@ use crate::{Row, StftProcessor, FFT_SIZE, HOP_SIZE};
 pub struct Outcome {
     /// Frames completed by this datagram (0..n, in time order).
     pub rows: Vec<Row>,
-    /// A sample-counter discontinuity, if this datagram closed one.
-    pub gap: Option<Gap>,
     /// Why the datagram was unusable, if it was.
     pub parse_error: Option<ParseError>,
     /// Complex samples carried (0 when malformed).
@@ -28,7 +26,6 @@ impl Outcome {
     fn malformed(error: ParseError) -> Self {
         Outcome {
             rows: Vec::new(),
-            gap: None,
             parse_error: Some(error),
             complex_samples: 0,
             sample_counter: 0,
@@ -39,15 +36,18 @@ impl Outcome {
 
 /// Stateful VITA49 → STFT pipeline.
 ///
-/// Holds the FFT overlap buffer and the gap tracker. Not `Sync`: it is driven
-/// from a single analysis thread, which is what keeps the FFT off the socket.
+/// Holds the FFT overlap buffer. Not `Sync`: it is driven from a single analysis
+/// thread, which is what keeps the FFT off the socket.
+///
+/// Gap tracking is deliberately NOT here. This processor only sees the datagrams
+/// that survived the analysis queue, so counting discontinuities here would
+/// report the consumer's own deliberate drops as RF loss — a misdiagnosis that
+/// makes a healthy link look lossy. Loss is tracked where every datagram is
+/// observed: the receive loop.
 pub struct PacketProcessor {
     processor: StftProcessor,
-    tracker: GapTracker,
     sample_rate: f64,
     malformed: u64,
-    gaps: u64,
-    missing_samples: u64,
 }
 
 impl PacketProcessor {
@@ -55,15 +55,12 @@ impl PacketProcessor {
     pub fn new(sample_rate: f64) -> Self {
         PacketProcessor {
             processor: StftProcessor::new(FFT_SIZE, HOP_SIZE),
-            tracker: GapTracker::new(NOMINAL_COMPLEX_SAMPLES as u64),
             sample_rate,
             malformed: 0,
-            gaps: 0,
-            missing_samples: 0,
         }
     }
 
-    /// Parse one datagram, convert sc16 → i8, advance the STFT, track loss.
+    /// Parse one datagram, convert sc16 → i8, and advance the STFT.
     pub fn observe(&mut self, datagram: &[u8]) -> Outcome {
         let packet: Packet<'_> = match vita49::parse_datagram(datagram) {
             Ok(p) => p,
@@ -76,14 +73,6 @@ impl PacketProcessor {
         let complex_samples = packet.complex_samples();
         let counter = packet.sample_counter(self.sample_rate);
 
-        let gap = self
-            .tracker
-            .observe(counter, complex_samples as u64)
-            .inspect(|g| {
-                self.gaps += 1;
-                self.missing_samples += g.missing_samples;
-            });
-
         // sc16 >> 8 preserves the 8-bit full-scale reference `to_db` calibrates
         // against. Reinterpreting the bytes as i8 instead would smear energy
         // across bins — see the tone test in `tests/tone_db.rs`.
@@ -92,7 +81,6 @@ impl PacketProcessor {
 
         Outcome {
             rows,
-            gap,
             parse_error: None,
             complex_samples,
             sample_counter: counter,
@@ -105,16 +93,6 @@ impl PacketProcessor {
         self.malformed
     }
 
-    /// Gaps detected so far.
-    pub fn gaps(&self) -> u64 {
-        self.gaps
-    }
-
-    /// Samples missing across those gaps.
-    pub fn missing_samples(&self) -> u64 {
-        self.missing_samples
-    }
-
     /// Samples consumed by the STFT so far.
     pub fn samples_consumed(&self) -> u64 {
         self.processor.samples_consumed()
@@ -124,11 +102,10 @@ impl PacketProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vita49::NOMINAL_SAMPLE_RATE;
+    use crate::vita49::{GapTracker, NOMINAL_COMPLEX_SAMPLES, NOMINAL_SAMPLE_RATE};
 
     /// Minimal independent packet builder (mirrors the corrected sigproc framing).
-    fn packet(ts_int: u32, ts_frac: u64, samples: &[(i16, i16)]) -> Vec<u8> {
-        let total_words = 5 + samples.len();
+    fn packet(ts_int: u32, ts_frac: u64, samples: &[(i16, i16)]) -> Vec<u8> {        let total_words = 5 + samples.len();
         let mut buf = vec![0u8; total_words * 4];
         let header = 0x10D0_0000u32 | (total_words as u32 - 1);
         buf[0..4].copy_from_slice(&header.to_be_bytes());
@@ -158,7 +135,6 @@ mod tests {
         let second = p.observe(&packet(0, NOMINAL_COMPLEX_SAMPLES as u64, &samples));
         assert_eq!(second.rows.len(), 1, "window fills at sample 4096");
         assert_eq!(second.rows[0].sample, 0);
-        assert_eq!(second.gap, None, "contiguous timestamps are not a gap");
 
         // Steady state: 2048 samples in, 2 frames out (hop 1024).
         let third = p.observe(&packet(0, (NOMINAL_COMPLEX_SAMPLES * 2) as u64, &samples));
@@ -175,18 +151,28 @@ mod tests {
     }
 
     #[test]
-    fn a_timestamp_jump_is_reported_not_interpolated() {
+    fn a_timestamp_jump_is_reported_and_not_interpolated() {
+        // Loss accounting is receive-side: the processor supplies the counter,
+        // the GapTracker (owned by the receive path) decides if it is a gap.
         let mut p = PacketProcessor::new(NOMINAL_SAMPLE_RATE);
+        let mut tracker = GapTracker::new(NOMINAL_COMPLEX_SAMPLES as u64);
         let samples: Vec<(i16, i16)> = (0..NOMINAL_COMPLEX_SAMPLES).map(|_| (1, 1)).collect();
 
-        p.observe(&packet(0, 0, &samples));
+        let first = p.observe(&packet(0, 0, &samples));
+        assert_eq!(
+            tracker.observe(first.sample_counter, first.complex_samples as u64),
+            None,
+            "first packet cannot be a gap"
+        );
+
         // Skip three packets' worth of timestamps.
         let jumped = p.observe(&packet(0, 2048 * 4, &samples));
-
-        let gap = jumped.gap.expect("gap detected");
+        let gap = tracker
+            .observe(jumped.sample_counter, jumped.complex_samples as u64)
+            .expect("gap detected");
         assert_eq!(gap.missing_samples, 2048 * 3);
-        assert_eq!(p.gaps(), 1);
-        assert_eq!(p.missing_samples(), 6144);
+        assert_eq!(tracker.gaps, 1);
+        assert_eq!(tracker.missing_samples, 6144);
     }
 
     #[test]

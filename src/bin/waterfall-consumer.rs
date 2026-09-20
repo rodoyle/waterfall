@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use waterfall::consumer::PacketProcessor;
 use waterfall::publish::{IngestMeta, IngestRequest, RowBatch, RowDto};
-use waterfall::vita49::{self, ParseError, NOMINAL_COMPLEX_SAMPLES};
+use waterfall::vita49::{self, GapTracker, ParseError, NOMINAL_COMPLEX_SAMPLES};
 
 /// Max UDP datagram we will read (datagrams are 8202-8212 bytes today).
 const RECV_BUF_BYTES: usize = 65_536;
@@ -249,7 +249,12 @@ fn spike_inspect(n: u64, datagram: &[u8], cfg: &Config) {
     match vita49::parse_datagram(datagram) {
         Ok(pkt) => {
             // Plausibility: real RF is neither constant nor a reinterpreted byte
-            // soup. Distinct-value count catches "i16 read as i8" garbage.
+            // soup. A constant or all-zero payload is the only thing this
+            // heuristic can honestly call wrong (dead ADC, misframed datagram).
+            // A clean bin-centred tone legitimately quantizes to a handful of
+            // distinct values, so "few distinct values" must NOT be reported as
+            // implausible — bit-depth mistakes are caught by the spectrum instead
+            // (see tests/tone_db.rs).
             let mut values = std::collections::HashSet::new();
             let mut nonzero = 0usize;
             for c in pkt.payload.chunks_exact(2) {
@@ -260,7 +265,7 @@ fn spike_inspect(n: u64, datagram: &[u8], cfg: &Config) {
                 values.insert(v);
             }
             let total = pkt.components().max(1);
-            let plausible = values.len() > 8 && nonzero * 4 > total;
+            let degenerate = values.len() <= 1;
             println!(
                 "SPIKE   parsed: stream_id={} ts_int={} ts_frac={} samples={} counter={} trailing={} size_field_matches={}",
                 pkt.stream_id,
@@ -272,11 +277,12 @@ fn spike_inspect(n: u64, datagram: &[u8], cfg: &Config) {
                 pkt.size_field_matches
             );
             println!(
-                "SPIKE   payload: {} components, {} distinct i16 values, {} non-zero -> plausible_sc16={}",
+                "SPIKE   payload: {} components, {} distinct i16 values, {} non-zero ({:.0}%) -> degenerate_payload={}",
                 pkt.components(),
                 values.len(),
                 nonzero,
-                plausible
+                100.0 * nonzero as f64 / total as f64,
+                degenerate
             );
             if !pkt.size_field_matches {
                 println!("SPIKE   NOTE: header size field disagrees with the delivered datagram length (length wins)");
@@ -297,6 +303,12 @@ async fn receive_loop(
 ) {
     let mut buf = vec![0u8; RECV_BUF_BYTES];
 
+    // Loss is tracked HERE, where every delivered datagram is observed — not in
+    // the analysis worker, which only sees datagrams that survived the bounded
+    // queue. Counting gaps there would report the consumer's own deliberate
+    // drops as RF loss and make a healthy link look lossy.
+    let mut tracker = GapTracker::new(NOMINAL_COMPLEX_SAMPLES as u64);
+
     loop {
         let (n, _src) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
@@ -315,13 +327,44 @@ async fn receive_loop(
             spike_inspect(received, datagram, &cfg);
         }
 
-        // Cheap rejection here keeps counters honest in the receive path; the
-        // analysis worker runs the same parser for real (it owns the STFT and
-        // the gap tracker), so its counters are the authoritative ones.
+        // Cheap rejection here keeps counters honest in the receive path, and
+        // this is the only place that sees EVERY datagram, so it owns both the
+        // wire-loss accounting and the sample counter.
         match vita49::parse_datagram(datagram) {
             Ok(pkt) => {
                 if !pkt.size_field_matches {
                     Counters::bump(&stats.size_field_mismatch);
+                }
+
+                stats
+                    .samples_received
+                    .fetch_add(pkt.components() as u64, Ordering::Relaxed);
+
+                // The unwrapped sample counter is the only loss signal available:
+                // stream_id and packet_count are both 0 today.
+                let counter = pkt.sample_counter(cfg.sample_rate);
+                stats
+                    .last_counter
+                    .store(counter.min(i64::MAX as u64) as i64, Ordering::Relaxed);
+
+                if let Some(gap) = tracker.observe(counter, pkt.complex_samples() as u64) {
+                    stats.gaps.store(tracker.gaps, Ordering::Relaxed);
+                    stats
+                        .missing_samples
+                        .store(tracker.missing_samples, Ordering::Relaxed);
+                    stats
+                        .out_of_order
+                        .store(tracker.out_of_order, Ordering::Relaxed);
+                    if tracker.gaps <= 5 || tracker.gaps.is_multiple_of(100) {
+                        println!(
+                            "waterfall-consumer: GAP #{} at counter {} — {} samples missing (total gaps={}, missing={})",
+                            tracker.gaps,
+                            gap.at_counter,
+                            gap.missing_samples,
+                            tracker.gaps,
+                            tracker.missing_samples
+                        );
+                    }
                 }
 
                 // Capture one real datagram for the committed test fixture.
@@ -370,8 +413,11 @@ async fn receive_loop(
 
 // ---------------- Analysis worker ----------------
 
-/// Parse, convert (sc16 → i8), STFT and gap-track every admitted datagram on a
-/// dedicated thread, so neither the FFT nor the bridge hop can stall the socket.
+/// Convert (sc16 → i8) and run the STFT over every admitted datagram on a
+/// dedicated thread, so the FFT can never stall the socket.
+///
+/// Wire-loss accounting deliberately lives in the receive loop instead: this
+/// worker only sees datagrams that survived the bounded queue.
 fn analysis_worker(
     mut rx: mpsc::Receiver<Vec<u8>>,
     batch: Arc<Mutex<RowBatch>>,
@@ -382,27 +428,6 @@ fn analysis_worker(
 
     while let Some(datagram) = rx.blocking_recv() {
         let outcome = pipeline.observe(&datagram);
-
-        let components = outcome.complex_samples as u64 * 2;
-        stats.samples_received.fetch_add(components, Ordering::Relaxed);
-        stats
-            .last_counter
-            .store(outcome.sample_counter.min(i64::MAX as u64) as i64, Ordering::Relaxed);
-
-        if let Some(gap) = outcome.gap {
-            println!(
-                "waterfall-consumer: GAP #{} at counter {} — {} samples missing (total gaps={}, missing={})",
-                pipeline.gaps(),
-                gap.at_counter,
-                gap.missing_samples,
-                pipeline.gaps(),
-                pipeline.missing_samples()
-            );
-        }
-        stats.gaps.store(pipeline.gaps(), Ordering::Relaxed);
-        stats
-            .missing_samples
-            .store(pipeline.missing_samples(), Ordering::Relaxed);
 
         for row in outcome.rows {
             Counters::bump(&stats.rows_produced);
@@ -591,8 +616,10 @@ async fn main() {
         .await
         .expect("failed to bind VITA49 receive socket");
 
-    // Bounded: a stalled analysis worker must never push back on the socket.
-    let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
+    // Bounded, but deep enough to absorb a burst: the analysis worker must
+    // never push back on the socket, yet dropping a packet is a real loss of
+    // analysis (counted, and reported separately from wire loss).
+    let (tx, rx) = mpsc::channel::<Vec<u8>>(512);
 
     let worker_batch = Arc::clone(&batch);
     let worker_stats = Arc::clone(&stats);
