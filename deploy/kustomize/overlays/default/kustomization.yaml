@@ -19,3 +19,15 @@ resources:
 images:
   - name: ghcr.io/rodoyle/waterfall
     newTag: latest
+patches:
+  # The public host is per-environment content: it is supplied HERE, not in the
+  # base (which keeps only the routing shape). JSON6902 `add` is used because
+  # Ingress rules have no patch-merge key, so a strategic merge would replace
+  # the whole rule list.
+  - target:
+      kind: Ingress
+      name: orbweaver
+    patch: |-
+      - op: add
+        path: /spec/rules/0/host
+        value: orbweaver.apps.home.arpa

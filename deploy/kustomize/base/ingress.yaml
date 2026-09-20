@@ -1,13 +1,16 @@
 # orbweaver — public entry point for the UI.
 #
-# Host `orbweaver.apps.home.arpa` is served by the cluster's traefik ingress
-# controller (the default ingress class) on port 80. LAN DNS for
-# `*.apps.home.arpa` comes from coredns-lan in the `lan-dns` namespace, so no
-# per-device hosts entry is required.
+# Routing shape only: the public HOST is environment content and lives in the
+# overlay (overlays/default/kustomization.yaml patches spec.rules[0].host). The
+# rule below deliberately has no host, so the base stays environment-agnostic.
+#
+# Served by the cluster's traefik ingress controller (the default ingress class)
+# on port 80. LAN DNS for `*.apps.home.arpa` comes from coredns-lan in the
+# `lan-dns` namespace, so no per-device hosts entry is required.
 #
 # HTTP only: the stack is LAN-only and read-only (a spectrum display plus a
 # WebSocket), so there is no credential to protect and no certificate to renew.
-# Adding TLS later needs only a `tls:` block here.
+# Adding TLS later needs only a `tls:` block here (or in the overlay).
 #
 # One route covers everything the UI needs: `path: /` matches /, /ws, /chunks,
 # /meta and /stats on the same origin, and traefik upgrades websockets on an
@@ -23,8 +26,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: orbweaver.apps.home.arpa
-      http:
+    - http:
         paths:
           - path: /
             pathType: Prefix
