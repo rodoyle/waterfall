@@ -1,132 +1,154 @@
-# Deploying the waterfall pipeline
+# Deploying orbweaver
 
-Three tiers: **sigproc** (RF collector, rpi-four-2) → **waterfall-consumer**
-(signal middleware) → **waterfall-bridge** (web tier) → browser.
+Three tiers, all in namespace `default`:
 
 ```
-sigproc ──UDP 8202/8212 B──▶ waterfall-service.default.svc:4820
-                                        │
-                              waterfall-consumer  (STFT, gap detection)
-                                        │ POST /ingest  (batched rows)
-                                        ▼
-                              waterfall-ui.default.svc:4780
-                                        │ /ws /chunks /meta /stats
-                                        ▼
-                         kubectl -n default port-forward svc/waterfall-ui 4780:4780
+sigproc (rpi-four-2, USRP B210, untouched)
+   │ UDP 8212 B datagrams -> waterfall-service.default.svc:4820
+   ▼
+orbweaver-consumer            [middleware: VITA49 -> sc16 -> STFT -> paced rows]
+   │ HTTP POST /ingest -> orbweaver-ui.default.svc:4780
+   ▼
+orbweaver-bridge              [web tier: /, /ws, /chunks, /meta, /stats]
+   ▲
+   │ traefik Ingress, host orbweaver.apps.home.arpa (HTTP, port 80)
+   └── browser:  http://orbweaver.apps.home.arpa
 ```
 
-## Files
+Naming: cluster objects and the public host are **orbweaver**; the GitHub repo,
+the Rust crate, the binaries and the image stay **waterfall**
+(`ghcr.io/rodoyle/waterfall:latest`), so the build pipeline is unaffected.
 
-| File | Purpose |
+## Layout
+
+| Path | Purpose |
 |---|---|
-| `Dockerfile` | One **linux/amd64** image with both binaries + the static front end |
-| `kaniko-job.yaml` | In-cluster build → `ghcr.io/rodoyle/waterfall:latest` (builder pinned to an amd64 node) |
-| `waterfall-consumer.yaml` | Middleware Deployment + Service `waterfall-service` (UDP 4820, TCP 4830 stats) |
-| `waterfall-bridge.yaml` | Web-tier Deployment + Service `waterfall-ui` (TCP 4780) |
+| `kustomize/build/` | kaniko Job (amd64 builder) → pushes `ghcr.io/rodoyle/waterfall:latest` |
+| `kustomize/base/` | canonical Deployments + Services + Ingress |
+| `kustomize/overlays/default/` | namespace, image tag — the app deploy root |
+| `kustomize/compat/` | the legacy `waterfall-service`, frozen; applied separately |
+| `Dockerfile` | the image the kaniko Job builds (referenced as `deploy/Dockerfile`) |
 
-## Apply order — this matters
-
-`sigproc` resolves `waterfall-service.default.svc.cluster.local` **once** and
-caches the result forever, retrying only while unresolved. Two consequences:
-
-1. **The consumer must be Running and bound to UDP 4820 before the Service
-   exists.** If the name resolves while nothing is listening, the first
-   datagrams are lost and (because resolution succeeded) sigproc never retries
-   the lookup.
-2. **sigproc must already be running the framing fix.** The image it was built
-   from before the fix panicked on the first packet it ever sent
-   (`vita49.rs`: 8202-byte buffer, 8212-byte write). Since the pod resolves the
-   Service name at startup, an early Service creation crash-loops it.
+## Deploy
 
 ```bash
-# 1. Build the waterfall image (after pushing to GitHub — kaniko clones master).
+# 1. Build the image (only needed when code changes; the tag is :latest).
 kubectl delete job kaniko-build-waterfall -n build --ignore-not-found
-kubectl apply -f deploy/kaniko-job.yaml
+kubectl apply -k deploy/kustomize/build
 kubectl -n build logs job/kaniko-build-waterfall -f
 
-# 2. Make sure sigproc runs the FIXED image, then restart onto it.
-#    Confirm the imageID digest changes off the pre-fix one (2a03f608...).
-kubectl -n default rollout restart deploy/sigproc
-kubectl -n default get pod -l app=sigproc -o jsonpath='{.items[0].status.containerStatuses[0].imageID}{"\n"}'
+# 2. Apply the canonical stack.
+kubectl apply -k deploy/kustomize/overlays/default
 
-# 3. Bring up the middleware FIRST and wait for Ready (bound to 4820).
-kubectl apply -f deploy/waterfall-consumer.yaml
-kubectl -n default rollout status deploy/waterfall-consumer
-kubectl -n default logs deploy/waterfall-consumer | head -40   # SPIKE lines
-
-# 4. Now the web tier.
-kubectl apply -f deploy/waterfall-bridge.yaml
-kubectl -n default rollout status deploy/waterfall-bridge
-
-# 5. ONLY NOW create the Service sigproc is waiting for.
-kubectl apply -f deploy/waterfall-service.yaml   # the DNS name, applied last
-kubectl -n default logs deploy/sigproc --tail=5       # expect: "forwarding started"
-
-# 6. Watch the transport and open the waterfall.
-kubectl -n default logs deploy/waterfall-consumer -f
-kubectl -n default port-forward svc/waterfall-ui 4780:4780
-#   → http://127.0.0.1:4780/
+# 3. Re-assert the frozen legacy Service (a no-op; see below).
+kubectl apply -k deploy/kustomize/compat
 ```
 
-Because the consumer Deployment and its Service are split across two files, the apply order in step 3 (Deployment) and step 5 (Service) is exactly the ordering the one-shot DNS resolution requires.
+## The legacy Service — read this before touching anything
 
-## Scheduling constraint (for the infra agent)
+sigproc's ConfigMap contains
 
-Neither workload pins a node. Both Deployments express the requirement as
-node affinity:
+```toml
+vita49_dest_host = "waterfall-service.default.svc.cluster.local"
+vita49_dest_port = 4820
+```
 
-- `kubernetes.io/arch In [amd64]` — the image is amd64-only (there is no arm64
-  build, and the two arm64 Pis plus jetson-1 are excluded automatically),
+and its forwarder resolves that name **once** at startup, caching the address
+forever; it retries only while unresolved. It cached `10.43.78.205`. So:
+
+- **Never delete or recreate `waterfall-service`.** A new ClusterIP would be
+  handed out, sigproc would keep sending to the old one, and the live RF stream
+  would die until sigproc is restarted (it belongs to another repo and session).
+- `kustomize/compat/waterfall-service.yaml` captures the live object verbatim,
+  including a pinned `clusterIP: 10.43.78.205`, so recreating it reproduces the
+  same address. Applying it is a no-op on an existing cluster.
+- The renamed `orbweaver-consumer` pods keep the compatibility label
+  `app: waterfall-consumer` **precisely so this Service keeps selecting them**.
+  Do not remove that label while the legacy Service exists.
+
+### Retirement checklist (when sigproc's owner migrates the ConfigMap)
+
+1. Ask the sigproc owner to set `vita49_dest_host = "orbweaver-service.default.svc.cluster.local"`
+   and roll the Deployment (a brief RF gap; their call).
+2. Confirm sigproc logs `resolved to … orbweaver-service` and its drop counter
+   stops rising.
+3. Delete the compat root: `kubectl delete -k deploy/kustomize/compat`.
+4. Drop the `app: waterfall-consumer` label from `kustomize/base/consumer.yaml`
+   and re-apply the overlay.
+5. Delete `kustomize/compat/` from the repo.
+
+## Zero-interruption apply order
+
+The RF path must never point at a Service with no ready endpoints, so:
+
+1. Create the canonical objects first (`orbweaver-service`, `orbweaver-ui`, both
+   Deployments, the Ingress). At this point the old pods still serve.
+2. Wait for the new pods to be Ready — the legacy Service matches the new
+   consumer pod through the compatibility label, and the old pod still matches
+   too, so it never has zero endpoints.
+3. Roll over: delete the superseded `waterfall-consumer` / `waterfall-bridge`
+   Deployments and the `waterfall-ui` Service. Never `waterfall-service`.
+4. Verify: sigproc's drop counter is unchanged, the consumer still reports
+   ~976.6 pkt/s with gaps ≈ 0, and `http://orbweaver.apps.home.arpa/` renders.
+
+## Ingress
+
+`orbweaver.apps.home.arpa` on the cluster's traefik ingress controller (default
+ingress class), HTTP only. LAN DNS for `*.apps.home.arpa` is served by
+`coredns-lan` in the `lan-dns` namespace, so no per-device hosts entry is
+needed. One route (`path: /`) covers the static UI, the WebSocket and the REST
+endpoints; traefik upgrades websockets on an ordinary HTTP route.
+
+TLS is deliberately absent: the stack is LAN-only and read-only (a spectrum
+display plus a WebSocket), so there is no credential to protect. Adding it later
+needs only a `tls:` block in `kustomize/base/ingress.yaml`.
+
+## Placement
+
+Neither workload pins a node. Both express the requirement as node affinity:
+
+- `kubernetes.io/arch In [amd64]` — the image is amd64-only, so the arm64 Pi
+  nodes and jetson-1 can never match;
 - `kubernetes.io/hostname NotIn [rpi-four-2, sab-laptop-1]` — keep the live RF
-  path off the SDR node and off the control plane.
+  path off the SDR node and off the control plane;
+- a **soft** preference for `med-laptop-2`, because `med-laptop-1` flaps
+  (`NodeNotReady` ↔ `NodeReady` roughly once a minute) and every stall dropped
+  live datagrams: the consumer held 976.5 pkt/s with zero gaps while that node
+  was healthy, then accumulated tens of thousands of missing samples.
 
-`sab-laptop-1` is amd64 and **untainted**, so arch matching alone would allow the
-pod onto the control plane; the `NotIn` is what prevents it. The scheduler still
-chooses freely between `med-laptop-1` and `med-laptop-2`.
-
-If the cluster is instead configured with labels/taints (e.g. taint the control
-plane, or label the med-laptops as the middleware pool), the `NotIn` term can be
-dropped in favour of that cluster-level configuration.
-
-## Dependencies already present in the cluster
-
-| Resource | Namespace | Used for |
-|---|---|---|
-| `ghcr-push` secret | `build` | kaniko push credentials |
-| `ghcr-pull` secret | `default` | Deployment image pulls |
-| `kaniko-scratch` PVC (SMB-backed) | `build` | kaniko layer scratch, off the nodes' disks |
+The infra repo may replace the soft preference with labels/taints.
 
 ## Operational notes
 
-- **Node placement.** The workloads are constrained to `amd64` and away from
-  `rpi-four-2`/`sab-laptop-1`, with a *soft* preference for `med-laptop-2`.
-  That preference exists because on 2026-09-20 `med-laptop-1` was flapping
-  (`NodeNotReady` <-> `NodeReady` roughly once a minute) and every stall dropped
-  live datagrams: the consumer held a steady 976.5 pkt/s with `gaps = 0` while
-  the node was healthy, then accumulated tens of thousands of missing samples.
-  After relocation to `med-laptop-2` it held 976.6 pkt/s with `gaps = 0` across
-  repeated 60 s+ observations. The infra agent may replace the soft preference
-  with node labels/taints.
 - **SO_RCVBUF.** The consumer asks for 8 MiB and logs what the kernel granted.
   On this cluster the grant is 425984 bytes (~50 ms of the live ~8 MB/s stream)
-  because `net.core.rmem_max` defaults to 212992. Two in-repo attempts to raise
-  it both fail: `securityContext.sysctls` passes API validation but the kubelet
-  rejects it with `SysctlForbidden`, and a privileged initContainer cannot write
-  `/proc/sys/net` in this runtime. The cluster-level remedy is
-  `kubelet --allowed-unsafe-sysctls=net.core.rmem_max` (infra agent).
-  Measured impact of leaving it capped: none in steady state (976.6 pkt/s,
-  `gaps = 0`, `stft_dropped = 0`); it is robustness margin for node stalls.
+  because `net.core.rmem_max` defaults to 212992. Both in-repo remedies fail:
+  `securityContext.sysctls` passes API validation but the kubelet rejects it with
+  `SysctlForbidden`, and a privileged initContainer cannot write `/proc/sys/net`
+  in this runtime. The cluster-level fix is
+  `kubelet --allowed-unsafe-sysctls=net.core.rmem_max`. Measured impact of
+  leaving it capped: **none** in steady state (976.6 pkt/s, gaps = 0,
+  `stft_dropped` = 0); it is robustness margin for node stalls.
 - **No synthetic fallback.** The bridge runs `--source=ingest`. If the RF feed
-  stops, `/meta` reports `stale: true`, the rows stop, and the UI readout turns
-  red. Verified by scaling the consumer to 0: `stale` became true and
-  `rows_ingested` stayed frozen (470132 across two readings) — the bridge never
-  invents rows. A waterfall that fabricates rows is worse than one that admits
-  it is dead.
-- **Live signal level.** Peak |sc16| measured between 46 and 7837 with mean
-  ~10-12, i.e. mostly below the 8-bit LSB of 256. That is why the RF path keeps
-  full 16-bit resolution (see `docs/plans/vita49-consumer.md`).
+  stops, `/meta` reports `stale: true`, rows stop, and the UI readout turns red.
+  Verified by scaling the consumer to 0: `stale` became true and `rows_ingested`
+  stayed frozen — the bridge never invents rows.
 - **Drop counters, not guesses.** `/stats` on the consumer separates
   `parse_errors`, `stft_dropped` (analysis queue full — the socket is never
-  blocked), `publish_dropped` (pacing buffer latest-wins) and
+  blocked), `publish_dropped` (pacing buffer, latest-wins) and
   `rows_lost_to_bridge` (HTTP failures). Gaps come from the VITA 49 sample
   counter, since `stream_id` and `packet_count` are both 0.
+- **Verification helpers.** `bin/local_smoke.sh` runs the whole pipeline locally
+  against a synthetic VITA49 sender; `bin/live_ui_check.cjs` drives a headless
+  browser against a live feed and writes a screenshot artifact.
+
+## Known follow-ups (not done here)
+
+- The container runs as root (no `USER` in the Dockerfile); adding a non-root
+  user would need a rebuild plus a check of the `/tmp` fixture write and static
+  file permissions.
+- The image tag is `latest`. Pinning a digest in
+  `kustomize/overlays/default/kustomization.yaml` would make rollouts frozen.
+- The infra repo (`src/infra`) was read-only for this work and is untouched by
+  it; it owns the reusable arm64 build base, and this repo owns its own build
+  job.

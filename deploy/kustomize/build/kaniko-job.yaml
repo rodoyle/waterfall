@@ -11,7 +11,7 @@
 #     bulk writes stay off the nodes' disks)
 #
 # Apply:  kubectl delete job kaniko-build-waterfall -n build --ignore-not-found
-#         kubectl apply -f deploy/kaniko-job.yaml
+#         kubectl apply -k deploy/kustomize/build
 # Follow: kubectl -n build logs job/kaniko-build-waterfall -f
 #
 # NOTE: kaniko clones the repo from GitHub, so the commit under test must be

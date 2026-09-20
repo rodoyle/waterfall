@@ -1,0 +1,42 @@
+# waterfall-service — the LEGACY name that sigproc resolves. Captured verbatim.
+#
+# DO NOT RENAME, DELETE, OR EDIT THE SELECTOR.
+#
+# sigproc's ConfigMap has
+#   vita49_dest_host = "waterfall-service.default.svc.cluster.local"
+# and its forwarder resolves that name ONCE at startup, caching the address
+# forever and retrying only while unresolved. It cached 10.43.78.205. Deleting
+# or recreating this Service hands out a different ClusterIP that sigproc keeps
+# sending to, so the live RF stream dies until sigproc is restarted.
+#
+# `clusterIP` is PINNED to that cached address deliberately: recreating the
+# Service then reproduces the same address, and any drift shows up as a diff.
+# Every other field matches the live object exactly (same name, same labels,
+# same selector, same ports) so applying this file is a no-op on the cluster.
+#
+# The canonical Service is `orbweaver-service` (base/services.yaml). Both select
+# the same pods: this one through the compatibility label
+# `app: waterfall-consumer` that the orbweaver-consumer pods still carry.
+#
+# Retirement steps are in deploy/README.md.
+apiVersion: v1
+kind: Service
+metadata:
+  name: waterfall-service
+  namespace: default
+  labels:
+    app: waterfall-consumer
+spec:
+  type: ClusterIP
+  clusterIP: 10.43.78.205
+  selector:
+    app: waterfall-consumer
+  ports:
+    - name: vita49
+      port: 4820
+      targetPort: vita49
+      protocol: UDP
+    - name: stats
+      port: 4830
+      targetPort: stats
+      protocol: TCP

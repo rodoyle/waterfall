@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The legacy Service that sigproc resolves, captured verbatim from the cluster
+# so it is in git and can never be forgotten.
+#
+# It is applied SEPARATELY from the canonical overlay, after the canonical stack
+# is healthy, so a routine `kubectl apply -k` can never mutate or prune it:
+#
+#   kubectl apply -k deploy/kustomize/compat
+#
+# See waterfall-service.yaml for why every field of this object is frozen.
+resources:
+  - waterfall-service.yaml

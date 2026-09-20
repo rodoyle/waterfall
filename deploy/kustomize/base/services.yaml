@@ -1,0 +1,51 @@
+# orbweaver-service — canonical name for the middleware tier.
+#
+# UDP 4820 is the VITA 49 stream; TCP 4830 is the stats/healthz endpoint.
+#
+# sigproc is currently pointed at the LEGACY Service name (`waterfall-service`,
+# captured in deploy/kustomize/compat) because its forwarder resolves DNS once
+# at startup and caches the address. Both Services select the same pods, so
+# either name reaches the consumer; the legacy one is retired once sigproc's
+# ConfigMap has been migrated (steps in deploy/README.md).
+apiVersion: v1
+kind: Service
+metadata:
+  name: orbweaver-service
+  namespace: default
+  labels:
+    app.kubernetes.io/name: orbweaver-consumer
+    app.kubernetes.io/part-of: orbweaver
+spec:
+  selector:
+    app.kubernetes.io/name: orbweaver-consumer
+  ports:
+    - name: vita49
+      port: 4820
+      targetPort: vita49
+      protocol: UDP
+    - name: stats
+      port: 4830
+      targetPort: stats
+      protocol: TCP
+---
+# orbweaver-ui — ClusterIP for the web tier's HTTP/WS/REST.
+#
+# The Ingress routes the public host here and the middleware tier POSTs its
+# rows here. Reachable directly when needed with
+# `kubectl -n default port-forward svc/orbweaver-ui 4780:4780`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: orbweaver-ui
+  namespace: default
+  labels:
+    app.kubernetes.io/name: orbweaver-bridge
+    app.kubernetes.io/part-of: orbweaver
+spec:
+  selector:
+    app.kubernetes.io/name: orbweaver-bridge
+  ports:
+    - name: http
+      port: 4780
+      targetPort: http
+      protocol: TCP

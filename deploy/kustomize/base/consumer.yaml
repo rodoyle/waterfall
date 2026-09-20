@@ -1,34 +1,45 @@
-# waterfall-consumer — the signal-middleware tier.
+# orbweaver-consumer — the signal-middleware tier.
 #
 # Binds UDP 4820, parses the VITA 49 stream sigproc pushes, converts sc16 -> i8,
-# runs the STFT over every packet, and POSTs paced rows to waterfall-bridge.
+# runs the STFT over every packet, and POSTs paced rows to the web tier.
 #
-# The Service name `waterfall-service` is hardcoded in the sigproc ConfigMap
-# (vita49_dest_host) and MUST stay exactly that; sigproc resolves it once and
-# caches the result, so the consumer must be Ready before this Service exists
-# (see deploy/README.md for the apply order).
+# LABEL COMPATIBILITY (load-bearing): sigproc resolves the DNS name
+# `waterfall-service.default.svc.cluster.local` ONCE at startup and cached the
+# IP, so that legacy Service cannot be renamed or recreated without interrupting
+# the live RF stream. It selects `app: waterfall-consumer`, so this Deployment
+# keeps that label on its pods while ALSO carrying the canonical
+# `app.kubernetes.io/name: orbweaver-consumer`. Both Services therefore select
+# the same pods and the rename is invisible to sigproc. See deploy/README.md.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waterfall-consumer
+  name: orbweaver-consumer
   namespace: default
   labels:
-    app: waterfall-consumer
+    app.kubernetes.io/name: orbweaver-consumer
+    app.kubernetes.io/part-of: orbweaver
+    app.kubernetes.io/component: middleware
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: waterfall-consumer
+      app.kubernetes.io/name: orbweaver-consumer
   template:
     metadata:
       labels:
+        # Canonical identity (selected by the orbweaver-service).
+        app.kubernetes.io/name: orbweaver-consumer
+        app.kubernetes.io/part-of: orbweaver
+        app.kubernetes.io/component: middleware
+        # COMPAT: the legacy `waterfall-service` Service selects this label, and
+        # sigproc has its ClusterIP cached. Do not remove until sigproc's
+        # vita49_dest_host has been migrated (deploy/README.md has the steps).
         app: waterfall-consumer
     spec:
-      # Placement is a CONSTRAINT, not a pin: choose any amd64 node that is not
-      # the SDR node (rpi-four-2) or the control plane (sab-laptop-1). The
-      # image is linux/amd64, so amd64 is required by the image anyway; the
-      # NotIn keeps the live RF stream off the SDR node and the control plane.
-      # The infra agent may replace this with node labels/taints if preferred.
+      # Placement is a CONSTRAINT, not a pin: any amd64 node that is not the SDR
+      # node (rpi-four-2) or the control plane (sab-laptop-1). amd64 is required
+      # by the image anyway; the NotIn keeps the live RF stream off the SDR node
+      # and the control plane.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -40,13 +51,9 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: NotIn
                     values: [rpi-four-2, sab-laptop-1]
-          # SOFT steering only. On 2026-09-20 med-laptop-1 was flapping
-          # (NodeNotReady <-> NodeReady about once a minute), and every stall
-          # dropped live datagrams: the consumer held a steady 976.5 pkt/s with
-          # zero gaps while that node was healthy. This preference keeps the
-          # workload on a permitted node (both are med-laptop-*) while avoiding
-          # the unstable one; the infra agent may replace it with cluster-level
-          # labels/taints.
+          # SOFT steering only: med-laptop-1 was flapping NodeNotReady/NodeReady
+          # about once a minute, and each stall dropped live datagrams while the
+          # stream held 976.5 pkt/s with zero gaps when that node was healthy.
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               preference:
@@ -58,27 +65,21 @@ spec:
         - name: ghcr-pull
       # NOTE on the receive buffer: the consumer requests SO_RCVBUF = 8 MiB, but
       # the kernel caps it at net.core.rmem_max (default 212992; read back as
-      # 425984) = ~50 ms of the live ~8 MB/s stream. Two mechanisms to raise it
-      # were tried and both are unavailable from inside this repo:
-      #   * `securityContext.sysctls` -> passes API validation but the kubelet
-      #     rejects it at admission with SysctlForbidden (it is an "unsafe"
-      #     sysctl), and
-      #   * a privileged initContainer -> /proc/sys/net is not writable in this
-      #     runtime (the write fails; no net.core directory is visible).
-      # The cluster-level fix is the kubelet flag
-      # `--allowed-unsafe-sysctls=net.core.rmem_max` (infra agent's call).
-      # Measured impact of leaving it capped: on a stable node the consumer
-      # holds 976.6 pkt/s with gaps = 0 and stft_dropped = 0, so this is a
-      # robustness margin for node stalls rather than a functional gap -- the
-      # multi-second outages observed were traced to med-laptop-1 flapping.
+      # 425984) = ~50 ms of the live ~8 MB/s stream. Both in-repo remedies are
+      # unavailable: `securityContext.sysctls` passes API validation but the
+      # kubelet rejects it with SysctlForbidden, and a privileged initContainer
+      # cannot write /proc/sys/net in this runtime. The cluster-level fix is the
+      # kubelet flag `--allowed-unsafe-sysctls=net.core.rmem_max`. Measured
+      # impact of leaving it capped: none in steady state (976.6 pkt/s,
+      # gaps = 0, stft_dropped = 0); it is robustness margin for node stalls.
       containers:
-        - name: waterfall-consumer
+        - name: orbweaver-consumer
           image: ghcr.io/rodoyle/waterfall:latest
           imagePullPolicy: Always
           command: ["/usr/local/bin/waterfall-consumer"]
           args:
             - --listen=0.0.0.0:4820
-            - --bridge-url=http://waterfall-ui.default.svc.cluster.local:4780
+            - --bridge-url=http://orbweaver-ui.default.svc.cluster.local:4780
             - --center-freq=915000000
             - --sample-rate=2000000
             - --publish-hz=30
@@ -112,8 +113,6 @@ spec:
             limits:
               cpu: "2"
               memory: 768Mi
-          # SO_RCVBUF needs to absorb ~8 MB/s of fragmented datagrams. The
-          # readiness probe is the consumer's own /healthz on the stats port.
           readinessProbe:
             httpGet:
               path: /healthz
@@ -126,7 +125,3 @@ spec:
               port: stats
             initialDelaySeconds: 10
             periodSeconds: 20
-# NOTE: the Service that sigproc resolves (`waterfall-service`) deliberately
-# lives in its own file, deploy/waterfall-service.yaml, so it can be applied
-# LAST — after this Deployment is Ready and bound to UDP 4820. See
-# deploy/README.md for why that ordering is load-bearing.

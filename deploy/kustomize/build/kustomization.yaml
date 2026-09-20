@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# The build half of the pipeline: a kaniko Job that clones this repo, builds the
+# image and pushes it to GHCR. Applied separately from the app overlay:
+#
+#   kubectl delete job kaniko-build-waterfall -n build --ignore-not-found
+#   kubectl apply -k deploy/kustomize/build
+#   kubectl -n build logs job/kaniko-build-waterfall -f
+#
+# The builder is pinned to an amd64 node (the image is linux/amd64 and there is
+# no QEMU in the path). Builder placement is unrelated to where the app runs.
+namespace: build
+resources:
+  - kaniko-job.yaml

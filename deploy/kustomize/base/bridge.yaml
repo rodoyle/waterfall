@@ -1,29 +1,38 @@
-# waterfall-bridge — the web tier.
+# orbweaver-bridge — the web tier.
 #
-# Serves the front end (static files) and the WebSocket/REST row stream, fed by
-# POST /ingest from waterfall-consumer. NO synthetic fallback in this
-# deployment (--source=ingest): a dead RF feed reports stale on /meta instead
-# of fabricating rows, because fabricated rows look exactly like real signal on
-# a waterfall.
+# Serves the front end (static files from /app/static in the image) and the
+# WebSocket/REST row stream, fed by POST /ingest from the middleware tier. NO
+# synthetic fallback (--source=ingest): a dead RF feed reports stale on /meta
+# instead of fabricating rows, because fabricated rows look exactly like real
+# signal on a waterfall.
+#
+# The UI is served by this process rather than a separate nginx pod: it already
+# has the assets and the data endpoints, so one origin covers /, /ws, /chunks,
+# /meta and /stats, and websockets need no extra Ingress route.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: waterfall-bridge
+  name: orbweaver-bridge
   namespace: default
   labels:
-    app: waterfall-bridge
+    app.kubernetes.io/name: orbweaver-bridge
+    app.kubernetes.io/part-of: orbweaver
+    app.kubernetes.io/component: web
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: waterfall-bridge
+      app.kubernetes.io/name: orbweaver-bridge
   template:
     metadata:
       labels:
-        app: waterfall-bridge
+        app.kubernetes.io/name: orbweaver-bridge
+        app.kubernetes.io/part-of: orbweaver
+        app.kubernetes.io/component: web
+        app: orbweaver-bridge
     spec:
-      # Same placement constraint as the consumer: amd64, not the SDR node and
-      # not the control plane. See waterfall-consumer.yaml for the rationale.
+      # Same placement constraint as the middleware tier: amd64, and never the
+      # SDR node or the control plane. See consumer.yaml for the rationale.
       affinity:
         nodeAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -35,9 +44,6 @@ spec:
                   - key: kubernetes.io/hostname
                     operator: NotIn
                     values: [rpi-four-2, sab-laptop-1]
-          # Soft steering away from the flapping med-laptop-1 (see
-          # waterfall-consumer.yaml for the evidence). Replaceable by
-          # cluster-level labels/taints owned by the infra agent.
           preferredDuringSchedulingIgnoredDuringExecution:
             - weight: 100
               preference:
@@ -48,10 +54,10 @@ spec:
       imagePullSecrets:
         - name: ghcr-pull
       containers:
-        - name: waterfall-bridge
+        - name: orbweaver-bridge
           image: ghcr.io/rodoyle/waterfall:latest
           imagePullPolicy: Always
-          # The image ENTRYPOINT is the bridge; CMD selects the producer.
+          # The image ENTRYPOINT is the bridge; args select the producer.
           command: ["/usr/local/bin/waterfall"]
           args:
             - --source=ingest
@@ -90,21 +96,3 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 20
----
-# waterfall-ui — ClusterIP for the bridge's HTTP/WS/REST (reached by the
-# consumer and by `kubectl -n default port-forward svc/waterfall-ui 4780:4780`).
-apiVersion: v1
-kind: Service
-metadata:
-  name: waterfall-ui
-  namespace: default
-  labels:
-    app: waterfall-bridge
-spec:
-  selector:
-    app: waterfall-bridge
-  ports:
-    - name: http
-      port: 4780
-      targetPort: http
-      protocol: TCP

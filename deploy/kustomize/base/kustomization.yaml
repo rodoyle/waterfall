@@ -1,0 +1,13 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Canonical orbweaver stack: middleware (consumer) + web tier (bridge), their
+# Services, and the Ingress.
+#
+# The legacy Service that sigproc resolves is deliberately NOT here: it lives in
+# ../compat so a routine `kubectl apply -k` of this overlay can never mutate or
+# prune it. See deploy/README.md for the apply order and retirement steps.
+resources:
+  - consumer.yaml
+  - bridge.yaml
+  - services.yaml
+  - ingress.yaml

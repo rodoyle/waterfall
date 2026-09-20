@@ -1,0 +1,35 @@
+# orbweaver — public entry point for the UI.
+#
+# Host `orbweaver.apps.home.arpa` is served by the cluster's traefik ingress
+# controller (the default ingress class) on port 80. LAN DNS for
+# `*.apps.home.arpa` comes from coredns-lan in the `lan-dns` namespace, so no
+# per-device hosts entry is required.
+#
+# HTTP only: the stack is LAN-only and read-only (a spectrum display plus a
+# WebSocket), so there is no credential to protect and no certificate to renew.
+# Adding TLS later needs only a `tls:` block here.
+#
+# One route covers everything the UI needs: `path: /` matches /, /ws, /chunks,
+# /meta and /stats on the same origin, and traefik upgrades websockets on an
+# ordinary HTTP route.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: orbweaver
+  namespace: default
+  labels:
+    app.kubernetes.io/name: orbweaver
+    app.kubernetes.io/part-of: orbweaver
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: orbweaver.apps.home.arpa
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: orbweaver-ui
+                port:
+                  number: 4780
