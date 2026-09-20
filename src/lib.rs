@@ -307,7 +307,7 @@ pub fn stft(input_bytes: &[i8]) -> Vec<Complex<f32>> {
 
 /// dB floor: values below this are clipped, matching the front end's −100..0
 /// display range (see `docs/plans/frontend.md`)
-const DB_FLOOR: f32 = -100.0;
+const DB_FLOOR: f32 = -140.0;
 
 /// Convert complex FFT bins to dBFS power, referenced to the 8-bit full scale.
 ///
@@ -588,7 +588,33 @@ mod tests {
         let n = 256;
         let bins = vec![Complex::new(0.0, 0.0); n];
         let db = to_db(&bins);
-        assert!(db.iter().all(|v| (*v - (-100.0)).abs() < 1e-3));
+        assert!(
+            db.iter().all(|v| (*v - DB_FLOOR).abs() < 1e-3),
+            "silence clamps to DB_FLOOR ({DB_FLOOR})"
+        );
+    }
+
+    /// The display regression this fixes: a bin whose level is below -100 dBFS
+    /// must keep its real value instead of being flattened onto the floor.
+    /// Measured live rows had 3099/4096 bins sitting exactly AT the old -100
+    /// clamp, which rendered the band as an almost uniform field.
+    #[test]
+    fn levels_below_minus_100_are_preserved_not_flattened() {
+        let n = 256usize;
+        // |X[k]| / N == 0.032767 gives 20*log10(0.032767 / 32767) = -120 dBFS.
+        let magnitude = 0.032767 * n as f32;
+        let bins = vec![Complex::new(magnitude, 0.0); n];
+
+        let db = to_db_with_reference(&bins, SC16_FULL_SCALE);
+        assert!(
+            (db[0] - -120.0).abs() < 1.0,
+            "a -120 dBFS bin must survive as ~-120, got {}",
+            db[0]
+        );
+        assert!(
+            db[0] > DB_FLOOR,
+            "and must not be sitting on the floor ({DB_FLOOR})"
+        );
     }
 
     #[test]

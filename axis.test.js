@@ -11,6 +11,7 @@ import {
     axisFromMeta,
     applyMetaToConfig,
     axisLabels,
+    autoIntensityRange,
 } from './axis.js';
 
 const CENTER = 915_000_000;
@@ -88,4 +89,34 @@ test('a baseband-only source keeps the relative Hz axis', () => {
     expect(derived.absoluteAxis).toBe(false);
     const labels = axisLabels({ ...derived, freqMin: 0, freqMax: 24_000, absoluteAxis: false }, 3);
     expect(labels.map((l) => l.text)).toEqual(['0.0 Hz', '12000 Hz', '24000 Hz']);
+});
+
+test('auto range fits the quiet live band so structure is visible', () => {
+    // Two rows in the measured live range: mostly at the floor, peaks ~-85.
+    const quiet = new Float32Array(4096).fill(-140);
+    for (let i = 0; i < 400; i++) quiet[100 + i * 7] = -95 + i * 0.02;
+    quiet[512] = -85.2;
+    const range = autoIntensityRange([quiet, quiet]);
+    expect(range).not.toBeNull();
+    expect(range.max).toBeCloseTo(-81.2, 1); // -85.2 + 4 dB margin
+    expect(range.min).toBeCloseTo(-144, 1); // -140 - 4 dB margin
+    // The span must cover the signal, not the old fixed [-100, 0] window.
+    expect(range.max - range.min).toBeGreaterThan(50);
+});
+
+test('auto range never returns a degenerate or out-of-bounds window', () => {
+    // Flat feed: the minimum span keeps the colour scale meaningful.
+    const flat = new Float32Array(64).fill(-100);
+    const flatRange = autoIntensityRange([flat]);
+    expect(flatRange.max - flatRange.min).toBeGreaterThanOrEqual(12);
+
+    // Clamped to the display limits.
+    const loud = new Float32Array([0, -160, -3]);
+    const loudRange = autoIntensityRange([loud]);
+    expect(loudRange.min).toBeGreaterThanOrEqual(-160);
+    expect(loudRange.max).toBeLessThanOrEqual(0);
+
+    // Nothing usable.
+    expect(autoIntensityRange([])).toBeNull();
+    expect(autoIntensityRange([new Float32Array([NaN, Infinity])])).toBeNull();
 });

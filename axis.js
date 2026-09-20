@@ -99,6 +99,42 @@ export function axisLabels(config, count = 5) {
     return labels;
 }
 
+/**
+ * Fit the dB colour range to the rows actually on screen.
+ *
+ * The live 915 MHz band is quiet: measured rows put 3099/4096 bins at the
+ * display floor with the rest between about -110 and -85 dBFS. A fixed
+ * [-100, 0] range therefore renders an almost uniform field. Fitting the range
+ * to recent data makes the structure visible at whatever level the band is,
+ * without retuning the receiver (which is out of scope).
+ *
+ * `rows` is an array of per-row dBFS arrays. Returns `{ min, max }` clamped to
+ * `clampMin..clampMax`, with a minimum span so a flat feed cannot produce a
+ * degenerate range, or `null` when there is nothing usable.
+ */
+export function autoIntensityRange(
+    rows,
+    { marginDb = 4, clampMin = -160, clampMax = 0, minSpanDb = 12 } = {}
+) {
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const row of rows) {
+        for (let i = 0; i < row.length; i++) {
+            const v = row[i];
+            if (!Number.isFinite(v)) continue;
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+
+    const min = Math.max(clampMin, lo - marginDb);
+    let max = Math.min(clampMax, hi + marginDb);
+    if (max - min < minSpanDb) max = Math.min(clampMax, min + minSpanDb);
+    if (max <= min) return null;
+    return { min, max };
+}
+
 const api = {
     binToHz,
     hzToBin,
@@ -106,6 +142,7 @@ const api = {
     axisFromMeta,
     applyMetaToConfig,
     axisLabels,
+    autoIntensityRange,
     DEFAULT_CENTER_HZ,
     DEFAULT_SAMPLE_RATE_HZ,
 };

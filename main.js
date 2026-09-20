@@ -10,8 +10,9 @@ const config = {
     sweepIntervalMs: 90,   // how often a new sweep arrives
     freqMin: 0,
     freqMax: 24000,        // Hz: Nyquist of the 48 kHz STFT source (informational axis)
-    intensityMin: -100,    // dB scale (plot properties)
+    intensityMin: -140,    // dB scale (plot properties); -140 matches DB_FLOOR in lib.rs
     intensityMax: 0,
+    autoRange: true,       // fit the dB range to live data until the user overrides it
     freqScale: 'linear',   // frequency-axis label mapping: 'linear' | 'log'
     paused: false,         // run/pause toggle for the animation clock
     demo: true,            // use random generation only until real sweeps arrive
@@ -203,10 +204,33 @@ function renderPlot() {
 // --- Live data client (replaces random generation once a bridge is reachable) ---
 // The bridge stream / general source of sweeps.
 let pendingLive = null;    // freshest live sweep awaiting a clock tick
+const recentSweeps = [];   // last few live rows, for dB auto-ranging
 function pushLiveSweep(arr) {
     pendingLive = arr;
+    recentSweeps.push(arr);
+    if (recentSweeps.length > 32) recentSweeps.shift();
     // Real data present; stop the random demo source.
     config.demo = false;
+}
+
+// The live 915 MHz band sits far below 0 dBFS (measured: most bins at the
+// floor, peaks around -85 dB), so a fixed [-100, 0] colour range renders an
+// almost uniform field. Fit the range to the data actually on screen; the dB
+// controls below take over as soon as the user touches them.
+let lastAutoRangeAt = 0;
+function maybeAutoRange() {
+    if (!config.autoRange || recentSweeps.length === 0) return;
+    const now = Date.now();
+    if (now - lastAutoRangeAt < 1000) return;
+    lastAutoRangeAt = now;
+    const range = WaterfallAxis.autoIntensityRange(recentSweeps);
+    if (!range) return;
+    const min = Math.floor(range.min);
+    const max = Math.ceil(range.max);
+    if (min === config.intensityMin && max === config.intensityMax) return;
+    config.intensityMin = min;
+    config.intensityMax = max;
+    syncDbInputs();
 }
 let liveClient = createLiveClient({
     numBins: config.numBins,
@@ -266,6 +290,7 @@ function tick() {
         return; // live, but no fresh frame yet — keep the last render
     }
     appendSweep(sweep);
+    maybeAutoRange();
     renderPlot();
 }
 
@@ -294,7 +319,7 @@ function applyGeometry() {
     }
     // The live client downsamples server bins to `numBins`; recreate it so the
     // new width takes effect for incoming sweeps.
-    try { liveClient.close(); } catch (_) {}
+    try { liveClient.close(); } catch {}
     liveClient = createLiveClient({
         numBins: config.numBins,
         onSweep: pushLiveSweep,
@@ -349,12 +374,14 @@ function wireControls() {
         const v = Math.max(-160, Math.min(0, parseInt(dbMinInput.value, 10) | 0));
         dbMinInput.value = v;
         config.intensityMin = v;
+        config.autoRange = false; // user took manual control of the colour range
         renderPlot();
     });
     dbMaxInput.addEventListener('change', () => {
         const v = Math.max(-160, Math.min(0, parseInt(dbMaxInput.value, 10) | 0));
         dbMaxInput.value = v;
         config.intensityMax = v;
+        config.autoRange = false;
         renderPlot();
     });
     freqScaleSelect.addEventListener('change', () => {
@@ -368,6 +395,14 @@ function wireControls() {
     });
 
     syncRunPauseBtn();
+}
+
+/// Keep the dB inputs showing the range actually in use (auto-range moves them).
+function syncDbInputs() {
+    const min = document.getElementById('ctlDbMin');
+    const max = document.getElementById('ctlDbMax');
+    if (min) min.value = String(config.intensityMin);
+    if (max) max.value = String(config.intensityMax);
 }
 
 // Seed the screen with silence so real rows fill in from the bottom upward
