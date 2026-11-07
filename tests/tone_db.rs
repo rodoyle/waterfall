@@ -36,7 +36,7 @@ const DBFS_TOLERANCE: f32 = 1.5;
 fn build_packet(ts_int: u32, ts_frac: u64, samples: &[(i16, i16)]) -> Vec<u8> {
     let total_words = 5 + samples.len(); // header + stream id + ts(3 words) + payload
     let mut buf = vec![0u8; total_words * 4];
-    let header: u32 = 0x10D0_0000 | (total_words as u32 - 1);
+    let header: u32 = 0x10D0_0000 | total_words as u32;
     buf[0..4].copy_from_slice(&header.to_be_bytes());
     buf[4..8].copy_from_slice(&0u32.to_be_bytes());
     buf[8..12].copy_from_slice(&ts_int.to_be_bytes());
@@ -300,10 +300,10 @@ fn real_captured_sigproc_datagram_parses() {
     assert_eq!(packet.header.packet_count, 0, "not populated by the sender");
     assert_eq!(packet.header.size_words, 2052);
     assert!(
-        packet.size_field_matches,
-        "declared size == delivered length"
+        !packet.size_field_matches,
+        "historical capture used the old total-words-minus-one convention"
     );
-    assert_eq!(packet.stream_id, 0, "always 0 today");
+    assert_eq!(packet.stream_id, 0, "historical sender used stream id 0");
     assert_eq!(packet.complex_samples(), NOMINAL_COMPLEX_SAMPLES);
     assert_eq!(packet.trailing_bytes, 0);
 

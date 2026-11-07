@@ -12,7 +12,7 @@ use crate::{Row, StftProcessor, FFT_SIZE, HOP_SIZE};
 pub struct Outcome {
     /// Frames completed by this datagram (0..n, in time order).
     pub rows: Vec<Row>,
-    /// Why the datagram was unusable, if it was.
+    /// Non-data outcome, including an IF context packet, if any.
     pub parse_error: Option<ParseError>,
     /// Complex samples carried (0 when malformed).
     pub complex_samples: usize,
@@ -23,7 +23,7 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    fn malformed(error: ParseError) -> Self {
+    fn non_data(error: ParseError) -> Self {
         Outcome {
             rows: Vec::new(),
             parse_error: Some(error),
@@ -70,9 +70,10 @@ impl PacketProcessor {
     pub fn observe(&mut self, datagram: &[u8]) -> Outcome {
         let packet: Packet<'_> = match vita49::parse_datagram(datagram) {
             Ok(p) => p,
+            Err(ParseError::ContextPacket) => return Outcome::non_data(ParseError::ContextPacket),
             Err(e) => {
                 self.malformed += 1;
-                return Outcome::malformed(e);
+                return Outcome::non_data(e);
             }
         };
 
@@ -141,7 +142,7 @@ mod tests {
     fn packet(ts_int: u32, ts_frac: u64, samples: &[(i16, i16)]) -> Vec<u8> {
         let total_words = 5 + samples.len();
         let mut buf = vec![0u8; total_words * 4];
-        let header = 0x10D0_0000u32 | (total_words as u32 - 1);
+        let header = 0x10D0_0000u32 | total_words as u32;
         buf[0..4].copy_from_slice(&header.to_be_bytes());
         buf[8..12].copy_from_slice(&ts_int.to_be_bytes());
         buf[12..20].copy_from_slice(&ts_frac.to_be_bytes());
@@ -222,5 +223,18 @@ mod tests {
         let good = p.observe(&packet(0, 0, &samples));
         assert_eq!(good.parse_error, None);
         assert_eq!(p.malformed(), 1);
+    }
+
+    #[test]
+    fn context_packets_do_not_count_as_malformed_or_consume_samples() {
+        let mut p = PacketProcessor::new(NOMINAL_SAMPLE_RATE);
+        let mut context = vec![0u8; 60];
+        context[..4].copy_from_slice(&0x40D0_000Fu32.to_be_bytes());
+        let outcome = p.observe(&context);
+        assert_eq!(outcome.parse_error, Some(ParseError::ContextPacket));
+        assert!(outcome.rows.is_empty());
+        assert_eq!(p.malformed(), 0);
+        assert_eq!(p.samples_seen(), 0);
+        assert_eq!(p.observe(&packet(0, 0, &[(1, -1)])).complex_samples, 1);
     }
 }

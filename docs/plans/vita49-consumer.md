@@ -28,18 +28,15 @@ tone/dBFS integration test in `tests/tone_db.rs`.
 >   `quiet_tones_keep_their_bin_and_level_on_the_sc16_path`).
 > - **One packet per UDP datagram**, not multiple. Size the parser from the
 >   datagram length, never assume 8212.
-> - **No context packets, ever.** Sample rate (2 MS/s), bit depth (sc16) and
->   scaling are not on the wire; take them from the sigproc ConfigMap or make
->   them consumer config.
-> - **`stream_id` is always 0 and `packet_count` is always 0** (known sender
->   bugs, recorded, not fixed). Do not dispatch on stream id or wait for a
->   sequence number; the unwrapped sample counter is the only loss signal.
-> - A full 2048-sample packet is **8212 bytes**, 4-byte aligned, with header
->   `0x10D00804` (packet type 0x1, TSI 3 free-running, TSF 1 sample-count, size
->   field 2052 = total words − 1). The pre-fix sender produced a malformed
->   8202-byte datagram that panicked on the first send; the parser tolerates
->   that legacy layout (size-field-mismatch flag, length wins) so a mixed
->   fleet cannot drop packets.
+> - **Current sender (2026-11-07):** IF Context packets (type 0x4) are
+>   emitted before data and periodically; the consumer skips them without
+>   counting them as malformed. Configuration remains external for now.
+> - `stream_id` and the modulo-16 data packet count are populated. Data loss
+>   tracking is per stream; context has a separate sequence.
+> - Size is **total 32-bit words**, including the header: a 2048-sample data
+>   packet has header `0x10D00805` with sequence 0. The current sender defaults
+>   to 360 samples, but the parser derives payload size from each datagram.
+>   Older size-mismatched data remain usable and are flagged.
 
 ## Role in the pipeline
 

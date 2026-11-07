@@ -4,36 +4,24 @@
 //! testable from hand-built byte fixtures. The receive loop lives in
 //! `src/bin/waterfall-consumer.rs`.
 //!
-//! # The wire format as actually sent by `sigproc`
+//! # Wire format sent by `sigproc`
 //!
 //! One packet per UDP datagram, big-endian 32-bit words:
 //!
 //! ```text
 //!   offset  size  content
 //!   0       4     word 0      packet header
-//!   4       4     word 1      stream id            (always 0 today)
+//!   4       4     word 1      stream id
 //!   8       4     word 2      timestamp seconds    (u32, free-running)
 //!   12      8     words 3-4   timestamp fraction   (u64, sample counts)
 //!   20      N*4   words 5+    payload: sc16 interleaved [I0,Q0,I1,Q1,...]
 //! ```
 //!
-//! Header word bits: `31-28` packet type (`0x1` = IF Data; context packets are
-//! never sent), `27-26` class id, `25-24` trailer, `23-22` TSI (`0x3` = "other",
-//! i.e. free-running — NOT UTC), `21-20` TSF (`0x1` = fraction is in sample
-//! counts), `19-16` packet count (always 0 today), `15-0` packet size in 32-bit
-//! words minus one.
-//!
-//! A full packet (2048 complex samples) is 2053 words = **8212 bytes** with
-//! header `0x10D00804`. `N` is smaller when the UHD read comes up short, so the
-//! parser sizes everything from the datagram length and never assumes 8212.
-//!
-//! # Deviation from `docs/plans/vita49-consumer.md`
-//!
-//! That plan assumed 8-bit I/Q, context packets, a populated stream id and
-//! packet count, and multiple packets per datagram. All four are wrong; this
-//! module is authoritative. It was corrected against `sigproc/src/vita49.rs`
-//! while fixing the sender's framing bug (the sender previously declared 4101
-//! pseudo-words for an 8202-byte datagram whose payload ended at byte 8212).
+//! Header bits: `31-28` packet type (0x1 IF Data, 0x4 IF Context), `27`
+//! class id, `25` trailer, `23-22` TSI, `21-20` TSF, `19-16` packet
+//! count, and `15-0` total packet size in 32-bit words, including the header.
+//! Data and context packets have separate modulo-16 counts per stream. Payload
+//! size is derived from the datagram, not a fixed sender packet size.
 
 /// Bytes of VRT header + timestamp fields before the payload (5 x 32-bit words).
 pub const HEADER_BYTES: usize = 20;
@@ -47,10 +35,10 @@ pub const TSI_OTHER: u8 = 0x3;
 /// Timestamp fraction expressed as a sample count.
 pub const TSF_SAMPLE_COUNT: u8 = 0x1;
 
-/// Complex samples in a full-rate sigproc packet (`capture.rs` `SAMPLES_PER_READ`).
+/// Historical full-read fixture size; live packet sizes may differ.
 pub const NOMINAL_COMPLEX_SAMPLES: usize = 2048;
 
-/// Bytes in a full-rate packet: 20-byte header + 2048 complex sc16 samples.
+/// Bytes in the historical full-read fixture.
 pub const NOMINAL_DATAGRAM_BYTES: usize = HEADER_BYTES + NOMINAL_COMPLEX_SAMPLES * 4;
 
 /// Nominal sample rate of the sigproc stream (2 MS/s, see its ConfigMap).
@@ -73,19 +61,18 @@ pub struct Header {
     pub tsi: u8,
     /// Bits 21-20.
     pub tsf: u8,
-    /// Bits 19-16 — sequence count. Always 0 today: do not depend on it.
+    /// Bits 19-16 — modulo-16 sequence count for this stream and packet type.
     pub packet_count: u8,
-    /// Bits 15-0 — declared packet length in 32-bit words, minus one.
+    /// Bits 15-0 — total packet length in 32-bit words, including the header.
     pub size_words: u16,
     /// The undecoded header word, for logs and fixtures.
     pub raw: u32,
 }
 
 impl Header {
-    /// The declared packet length in bytes, if the size field is taken at face
-    /// value (`(size_words + 1) * 4`).
+    /// The declared packet length in bytes (`size_words * 4`).
     pub fn declared_bytes(&self) -> usize {
-        (self.size_words as usize + 1) * 4
+        self.size_words as usize * 4
     }
 }
 
@@ -114,8 +101,11 @@ pub fn parse_header(word: u32) -> Header {
 pub enum ParseError {
     /// Fewer than [`MIN_DATAGRAM_BYTES`] arrived.
     TooShort { len: usize, need: usize },
-    /// Not an IF Data packet (context packets are never sent, so this is a
-    /// misdirected or foreign datagram).
+    /// An IF Context packet, which carries metadata rather than IQ samples.
+    ContextPacket,
+    /// A context packet whose declared length does not match the datagram.
+    ContextLengthMismatch { declared: usize, actual: usize },
+    /// Not an IF Data or IF Context packet.
     UnsupportedPacketType(u8),
     /// User-data trailer bit set; the payload would end with a trailer word this
     /// parser does not know how to strip, so it refuses rather than guessing.
@@ -128,6 +118,10 @@ impl std::fmt::Display for ParseError {
             ParseError::TooShort { len, need } => {
                 write!(f, "datagram too short: {len} bytes, need at least {need}")
             }
+            ParseError::ContextPacket => write!(f, "IF context packet (no samples)"),
+            ParseError::ContextLengthMismatch { declared, actual } => write!(
+                f, "context declares {declared} bytes but {actual} arrived"
+            ),
             ParseError::UnsupportedPacketType(t) => {
                 write!(
                     f,
@@ -148,7 +142,7 @@ impl std::error::Error for ParseError {}
 #[derive(Debug, Clone, Copy)]
 pub struct Packet<'a> {
     pub header: Header,
-    /// Word 1. Always 0 today: informational only, never dispatch on it.
+    /// Word 1 — stream identifier.
     pub stream_id: u32,
     /// Word 2 — free-running seconds.
     pub ts_int: u32,
@@ -175,9 +169,7 @@ impl<'a> Packet<'a> {
 
     /// Monotonic sample counter built from both timestamp fields.
     ///
-    /// `ts_int * sample_rate + ts_frac`, matching how the sender encoded it. The
-    /// step between consecutive packets is the ONLY loss signal available: the
-    /// stream id and packet count are both 0.
+    /// `ts_int * sample_rate + ts_frac`, matching how the sender encoded it.
     pub fn sample_counter(&self, sample_rate: f64) -> u64 {
         (self.ts_int as u64)
             .saturating_mul(sample_rate as u64)
@@ -234,6 +226,15 @@ pub fn parse_datagram(buf: &[u8]) -> Result<Packet<'_>, ParseError> {
 
     let header = parse_header(u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]));
 
+    if header.packet_type == 0x4 {
+        if header.declared_bytes() != buf.len() {
+            return Err(ParseError::ContextLengthMismatch {
+                declared: header.declared_bytes(),
+                actual: buf.len(),
+            });
+        }
+        return Err(ParseError::ContextPacket);
+    }
     if header.packet_type != IF_DATA_PACKET_TYPE {
         return Err(ParseError::UnsupportedPacketType(header.packet_type));
     }
@@ -279,7 +280,7 @@ pub struct Gap {
 #[derive(Debug, Default, Clone)]
 pub struct GapTracker {
     last: Option<u64>,
-    /// Expected step between consecutive full packets, in samples.
+    /// Number of samples in the previous packet.
     expected_step: u64,
     pub gaps: u64,
     pub missing_samples: u64,
@@ -289,7 +290,7 @@ pub struct GapTracker {
 }
 
 impl GapTracker {
-    /// `expected_step` is the nominal samples per packet (2048 for a full read).
+    /// Set the initial expected step; actual packet lengths take precedence.
     pub fn new(expected_step: u64) -> Self {
         GapTracker {
             expected_step,
@@ -306,12 +307,15 @@ impl GapTracker {
     pub fn observe(&mut self, counter: u64, samples_in_packet: u64) -> Option<Gap> {
         let Some(previous) = self.last else {
             self.last = Some(counter);
+            self.expected_step = samples_in_packet;
             return None;
         };
 
         if counter < previous {
             self.out_of_order += 1;
-            self.last = Some(counter);
+            return None;
+        }
+        if counter == previous {
             return None;
         }
 
@@ -319,10 +323,11 @@ impl GapTracker {
         self.last_step = step;
         self.last = Some(counter);
 
-        // Allow one sample of slack for float/truncation effects at the sender,
-        // and treat an unpopulated packet count as "no information", not loss.
-        if step > self.expected_step + 1 {
-            let missing = step - self.expected_step;
+        // Compare against the preceding packet's length, not a fixed nominal size.
+        // Allow one sample of slack for float/truncation effects at the sender.
+        let expected_step = std::mem::replace(&mut self.expected_step, samples_in_packet);
+        if step > expected_step + 1 {
+            let missing = step - expected_step;
             self.gaps += 1;
             self.missing_samples += missing;
             return Some(Gap {
@@ -330,9 +335,6 @@ impl GapTracker {
                 missing_samples: missing,
             });
         }
-
-        // A short read legitimately advances less than the expected step.
-        let _ = samples_in_packet;
         None
     }
 
@@ -342,6 +344,50 @@ impl GapTracker {
     }
 }
 
+/// Per-stream data loss tracking. Context packets must not be passed here.
+#[derive(Debug, Default)]
+pub struct DataStreamTracker {
+    streams: std::collections::HashMap<u32, DataStreamState>,
+    pub gaps: u64,
+    pub missing_samples: u64,
+    pub out_of_order: u64,
+    /// Data sequence discontinuities (the 4-bit count cannot reveal multiples of 16).
+    pub sequence_gaps: u64,
+}
+
+#[derive(Debug, Default)]
+struct DataStreamState {
+    samples: GapTracker,
+    sequence: Option<u8>,
+}
+
+impl DataStreamTracker {
+    /// Observe one IF Data packet, maintaining independent stream baselines.
+    pub fn observe(&mut self, packet: &Packet<'_>, sample_rate: f64) -> Option<Gap> {
+        let state = self.streams.entry(packet.stream_id).or_default();
+        let counter = packet.sample_counter(sample_rate);
+        if let (Some(previous_counter), Some(previous_sequence)) =
+            (state.samples.last_counter(), state.sequence)
+        {
+            if counter > previous_counter
+                && packet.header.packet_count != ((previous_sequence + 1) & 0xf)
+            {
+                self.sequence_gaps += 1;
+            }
+        }
+        if state.samples.last_counter().is_none_or(|last| counter > last) {
+            state.sequence = Some(packet.header.packet_count);
+        }
+        let previous_out_of_order = state.samples.out_of_order;
+        let gap = state.samples.observe(counter, packet.complex_samples() as u64);
+        self.out_of_order += state.samples.out_of_order - previous_out_of_order;
+        if let Some(gap) = gap {
+            self.gaps += 1;
+            self.missing_samples += gap.missing_samples;
+        }
+        gap
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,8 +401,8 @@ mod tests {
         let total_words = 5 + samples; // 2053
         let mut buf = vec![0u8; total_words * 4]; // 8212
 
-        // 0x1 << 28 | 0x3 << 22 | 0x1 << 20 | (total_words - 1)
-        let header: u32 = 0x10D0_0000 | (total_words as u32 - 1);
+        // 0x1 << 28 | 0x3 << 22 | 0x1 << 20 | total_words
+        let header: u32 = 0x10D0_0000 | total_words as u32;
         buf[0..4].copy_from_slice(&header.to_be_bytes());
         buf[4..8].copy_from_slice(&0u32.to_be_bytes()); // stream id (0 today)
         buf[8..12].copy_from_slice(&ts_int.to_be_bytes());
@@ -374,16 +420,16 @@ mod tests {
 
     #[test]
     fn header_bit_fields_are_decoded() {
-        let h = parse_header(0x10D0_0804);
+        let h = parse_header(0x10D0_0805);
         assert_eq!(h.packet_type, IF_DATA_PACKET_TYPE);
         assert!(!h.class_id_present);
         assert!(!h.trailer_present);
         assert_eq!(h.tsi, TSI_OTHER);
         assert_eq!(h.tsf, TSF_SAMPLE_COUNT);
         assert_eq!(h.packet_count, 0);
-        assert_eq!(h.size_words, 0x0804);
+        assert_eq!(h.size_words, 0x0805);
         assert_eq!(h.declared_bytes(), NOMINAL_DATAGRAM_BYTES);
-        assert_eq!(h.raw, 0x10D0_0804);
+        assert_eq!(h.raw, 0x10D0_0805);
     }
 
     #[test]
@@ -399,8 +445,8 @@ mod tests {
         let pkt = parse_datagram(&datagram).expect("full packet parses");
 
         assert_eq!(datagram.len(), NOMINAL_DATAGRAM_BYTES);
-        assert_eq!(pkt.header.raw, 0x10D0_0804);
-        assert_eq!(pkt.header.size_words, 2052);
+        assert_eq!(pkt.header.raw, 0x10D0_0805);
+        assert_eq!(pkt.header.size_words, 2053);
         assert!(pkt.size_field_matches);
         assert_eq!(pkt.stream_id, 0);
         assert_eq!(pkt.ts_int, 7);
@@ -434,9 +480,9 @@ mod tests {
 
     #[test]
     fn short_packet_is_sized_from_the_datagram_not_assumed_full() {
-        // Three complex samples: 5 + 3 = 8 words = 32 bytes, size field 7.
+        // Three complex samples: 5 + 3 = 8 words = 32 bytes, size field 8.
         let mut buf = vec![0u8; HEADER_BYTES + 3 * 4];
-        buf[0..4].copy_from_slice(&(0x10D0_0000u32 | 7).to_be_bytes());
+        buf[0..4].copy_from_slice(&(0x10D0_0000u32 | 8).to_be_bytes());
         buf[8..12].copy_from_slice(&99u32.to_be_bytes());
         buf[12..20].copy_from_slice(&2048u64.to_be_bytes());
         for i in 0..3 {
@@ -445,7 +491,7 @@ mod tests {
         }
 
         let pkt = parse_datagram(&buf).expect("short packet parses");
-        assert_eq!(pkt.header.size_words, 7);
+        assert_eq!(pkt.header.size_words, 8);
         assert!(pkt.size_field_matches);
         assert_eq!(pkt.complex_samples(), 3);
         assert_eq!(pkt.to_i8()[0], 1); // 256 >> 8
@@ -463,7 +509,7 @@ mod tests {
         assert_eq!(pkt.header.size_words, 4100);
         assert!(
             !pkt.size_field_matches,
-            "declared 16404 bytes, delivered 8202"
+            "declared 16400 bytes, delivered 8202"
         );
         assert_eq!(pkt.payload.len(), 8180, "whole words only");
         assert_eq!(pkt.complex_samples(), 2045);
@@ -503,7 +549,7 @@ mod tests {
         ctx[0] = 0x40;
         assert_eq!(
             parse_datagram(&ctx).unwrap_err(),
-            ParseError::UnsupportedPacketType(0x4)
+            ParseError::ContextPacket
         );
 
         let mut trailer = full_packet(0, 0);
@@ -562,7 +608,7 @@ mod tests {
         assert_eq!(t.gaps, 0);
 
         // A real dropout of three packets.
-        let gap = t.observe(7167 + 2048 * 4, 2048).expect("gap detected");
+        let gap = t.observe(7167 + 1024 + 2048 * 3, 2048).expect("gap detected");
         assert_eq!(gap.missing_samples, 2048 * 3);
         assert_eq!(t.gaps, 1);
         assert_eq!(t.missing_samples, 2048 * 3);
@@ -572,7 +618,7 @@ mod tests {
         assert_eq!(t.out_of_order, 1);
         assert_eq!(t.gaps, 1);
 
-        assert_eq!(t.last_counter(), Some(100));
+        assert_eq!(t.last_counter(), Some(7167 + 1024 + 2048 * 3));
     }
 
     #[test]
@@ -584,5 +630,59 @@ mod tests {
         }
         assert_eq!(t.gaps, 1);
         assert_eq!(t.missing_samples, 4096);
+    }
+
+    fn data_packet(stream_id: u32, seq: u8, counter: u64, samples: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; HEADER_BYTES + samples * 4];
+        let header = 0x10d0_0000 | ((seq as u32 & 15) << 16) | (5 + samples as u32);
+        buf[..4].copy_from_slice(&header.to_be_bytes());
+        buf[4..8].copy_from_slice(&stream_id.to_be_bytes());
+        buf[12..20].copy_from_slice(&counter.to_be_bytes());
+        buf
+    }
+
+    #[test]
+    fn streams_track_variable_lengths_sequence_wrap_and_context_separately() {
+        let mut tracker = DataStreamTracker::default();
+        let mut context = vec![0u8; 60];
+        context[..4].copy_from_slice(&0x40d9_000fu32.to_be_bytes());
+        let packets = [
+            data_packet(10, 15, 0, 360),
+            data_packet(20, 4, 1000, 5),
+            data_packet(10, 0, 360, 12),
+            data_packet(20, 5, 1005, 5),
+            data_packet(10, 1, 372, 360),
+        ];
+        for (i, bytes) in packets.iter().enumerate() {
+            if i == 2 {
+                assert_eq!(parse_datagram(&context).unwrap_err(), ParseError::ContextPacket);
+            }
+            let packet = parse_datagram(bytes).expect("data packet");
+            assert!(packet.size_field_matches);
+            assert_eq!(tracker.observe(&packet, SAMPLE_RATE), None);
+        }
+        assert_eq!((tracker.gaps, tracker.missing_samples, tracker.sequence_gaps), (0, 0, 0));
+
+        let dropped = data_packet(10, 3, 1092, 9);
+        let gap = tracker.observe(&parse_datagram(&dropped).unwrap(), SAMPLE_RATE).unwrap();
+        assert_eq!(gap.missing_samples, 360);
+        assert_eq!((tracker.gaps, tracker.missing_samples, tracker.sequence_gaps), (1, 360, 1));
+
+        // A late packet or duplicate must not move the data baseline backwards.
+        let late = data_packet(10, 2, 732, 360);
+        assert_eq!(tracker.observe(&parse_datagram(&late).unwrap(), SAMPLE_RATE), None);
+        assert_eq!(tracker.out_of_order, 1);
+        assert_eq!(tracker.observe(&parse_datagram(&dropped).unwrap(), SAMPLE_RATE), None);
+        let next = data_packet(10, 4, 1101, 3);
+        assert_eq!(tracker.observe(&parse_datagram(&next).unwrap(), SAMPLE_RATE), None);
+        assert_eq!((tracker.gaps, tracker.sequence_gaps), (1, 1));
+    }
+
+    #[test]
+    fn truncated_context_is_not_silently_accepted() {
+        let mut context = vec![0u8; 24];
+        context[..4].copy_from_slice(&0x40d0_000fu32.to_be_bytes());
+        assert_eq!(parse_datagram(&context).unwrap_err(),
+            ParseError::ContextLengthMismatch { declared: 60, actual: 24 });
     }
 }

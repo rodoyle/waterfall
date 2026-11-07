@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Synthetic VITA 49 tone sender for local end-to-end smoke tests.
 
-Emits exactly what `sigproc` emits (post framing-fix), so the middleware, the
-STFT and the dBFS calibration can be exercised without the B210 or the cluster:
+The middleware, STFT and dBFS calibration can be exercised without the B210 or cluster:
 
   * one IF Data packet per UDP datagram,
   * 20-byte header (5 big-endian 32-bit words) + sc16 interleaved I/Q payload,
   * 2048 complex samples per packet -> 2053 words -> 8212 bytes,
-  * header 0x10D00804 (type 0x1, TSI=3 free-running, TSF=1 sample counts),
+  * header 0x10D00805 for sequence 0 (type 0x1, TSI=3, TSF=1),
   * phase-continuous tone so consecutive packets do not smear across bins.
 
 The tone is placed at an exact FFT bin, so the receiver can assert the peak bin
@@ -25,14 +24,14 @@ HEADER_BYTES = 20
 NOMINAL_SAMPLES = 2048
 
 
-def build_packet(ts_int, first_sample, bin_index, fft_size, amplitude_sc16, n_samples):
+def build_packet(ts_int, first_sample, bin_index, fft_size, amplitude_sc16, n_samples, packet_count=0):
     """One VITA 49 IF Data packet, big-endian, sized from its own word count."""
     total_words = 5 + n_samples  # 2 sc16 components = 1 32-bit word
     buf = bytearray(total_words * 4)
 
-    header = 0x10D00000 | (total_words - 1)  # size field = total words - 1
+    header = 0x10D00000 | ((packet_count & 0xF) << 16) | total_words
     struct.pack_into(">I", buf, 0, header)
-    struct.pack_into(">I", buf, 4, 0)  # stream id: always 0 today
+    struct.pack_into(">I", buf, 4, 0)  # synthetic stream id
     struct.pack_into(">I", buf, 8, ts_int)  # timestamp integer seconds
     struct.pack_into(">Q", buf, 12, first_sample)  # fraction: SAMPLE COUNTS
 
@@ -85,6 +84,7 @@ def main():
             fft_size=args.fft,
             amplitude_sc16=args.amp,
             n_samples=NOMINAL_SAMPLES,
+            packet_count=sent,
         )
         try:
             sock.sendto(datagram, target)

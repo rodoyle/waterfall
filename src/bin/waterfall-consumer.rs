@@ -6,9 +6,8 @@
 //! tier (`waterfall-bridge`) over `POST /ingest`.
 //!
 //! Design constraints that are load-bearing:
-//!   * The receive loop must NEVER block on analysis or on the network. A full
-//!     datagram is 8212 bytes and arrives as ~6 IP fragments at 1450-byte pod
-//!     MTU, so a stalled reader drops fragments and loses whole packets.
+//!   * The receive loop must NEVER block on analysis or on the network; a
+//!     stalled reader can drop datagrams and lose samples.
 //!   * A large receive buffer is required: at ~8 MB/s the default buffer
 //!     overflows and shows up as phantom loss.
 //!   * Every packet is analysed (no RF decimation); only *publication* is paced.
@@ -34,9 +33,9 @@ use waterfall::cli;
 use waterfall::consumer::PacketProcessor;
 use waterfall::publish::{IngestMeta, IngestRequest, RowBatch, RowDto};
 use waterfall::shutdown;
-use waterfall::vita49::{self, GapTracker, ParseError, NOMINAL_COMPLEX_SAMPLES};
+use waterfall::vita49::{self, DataStreamTracker, ParseError};
 
-/// Max UDP datagram we will read (datagrams are 8202-8212 bytes today).
+/// Buffer large enough for any UDP datagram.
 const RECV_BUF_BYTES: usize = 65_536;
 
 // ---------------- Counters ----------------
@@ -63,6 +62,7 @@ struct Counters {
     gaps: AtomicU64,
     missing_samples: AtomicU64,
     out_of_order: AtomicU64,
+    sequence_gaps: AtomicU64,
     /// Last sample counter, or -1 before the first packet.
     last_counter: AtomicI64,
     /// Effective SO_RCVBUF granted by the kernel.
@@ -107,6 +107,7 @@ struct StatsSnapshot {
     gaps: u64,
     missing_samples: u64,
     out_of_order: u64,
+    sequence_gaps: u64,
     last_sample_counter: Option<u64>,
     rcvbuf_bytes: u64,
     /// Peak and mean |sc16| level of the live RF (see note in PacketProcessor).
@@ -327,6 +328,7 @@ fn spike_inspect(n: u64, datagram: &[u8], cfg: &Config) {
                 println!("SPIKE   NOTE: header size field disagrees with the delivered datagram length (length wins)");
             }
         }
+        Err(ParseError::ContextPacket) => println!("SPIKE   IF context packet (no samples)"),
         Err(e) => println!("SPIKE   parse failed: {e}"),
     }
 }
@@ -346,7 +348,7 @@ async fn receive_loop(
     // the analysis worker, which only sees datagrams that survived the bounded
     // queue. Counting gaps there would report the consumer's own deliberate
     // drops as RF loss and make a healthy link look lossy.
-    let mut tracker = GapTracker::new(NOMINAL_COMPLEX_SAMPLES as u64);
+    let mut tracker = DataStreamTracker::default();
 
     loop {
         let (n, _src) = match socket.recv_from(&mut buf).await {
@@ -379,21 +381,18 @@ async fn receive_loop(
                     .samples_received
                     .fetch_add(pkt.components() as u64, Ordering::Relaxed);
 
-                // The unwrapped sample counter is the only loss signal available:
-                // stream_id and packet_count are both 0 today.
+                // Sample timestamps and data sequence counts are tracked per stream.
                 let counter = pkt.sample_counter(cfg.sample_rate);
                 stats
                     .last_counter
                     .store(counter.min(i64::MAX as u64) as i64, Ordering::Relaxed);
 
-                if let Some(gap) = tracker.observe(counter, pkt.complex_samples() as u64) {
-                    stats.gaps.store(tracker.gaps, Ordering::Relaxed);
-                    stats
-                        .missing_samples
-                        .store(tracker.missing_samples, Ordering::Relaxed);
-                    stats
-                        .out_of_order
-                        .store(tracker.out_of_order, Ordering::Relaxed);
+                let gap = tracker.observe(&pkt, cfg.sample_rate);
+                stats.gaps.store(tracker.gaps, Ordering::Relaxed);
+                stats.missing_samples.store(tracker.missing_samples, Ordering::Relaxed);
+                stats.out_of_order.store(tracker.out_of_order, Ordering::Relaxed);
+                stats.sequence_gaps.store(tracker.sequence_gaps, Ordering::Relaxed);
+                if let Some(gap) = gap {
                     if tracker.gaps <= 5 || tracker.gaps.is_multiple_of(100) {
                         println!(
                             "waterfall-consumer: GAP #{} at counter {} — {} samples missing (total gaps={}, missing={})",
@@ -408,9 +407,7 @@ async fn receive_loop(
 
                 // Capture one real datagram for the committed test fixture.
                 if let Some(path) = cfg.capture_fixture.as_deref() {
-                    if !fixture_written.swap(true, Ordering::Relaxed)
-                        && pkt.complex_samples() == NOMINAL_COMPLEX_SAMPLES
-                    {
+                    if !fixture_written.swap(true, Ordering::Relaxed) {
                         match std::fs::write(path, datagram) {
                             Ok(()) => {
                                 println!("waterfall-consumer: captured {n}-byte fixture to {path}")
@@ -422,9 +419,12 @@ async fn receive_loop(
                     }
                 }
             }
+            Err(ParseError::ContextPacket) => continue,
             Err(e) => {
                 Counters::bump(&stats.parse_errors);
                 match e {
+                    ParseError::ContextPacket => unreachable!("handled above"),
+                    ParseError::ContextLengthMismatch { .. } => {}
                     ParseError::TooShort { .. } => Counters::bump(&stats.too_short),
                     ParseError::UnsupportedPacketType(_) => Counters::bump(&stats.wrong_type),
                     ParseError::UnsupportedTrailer => Counters::bump(&stats.trailerized),
@@ -601,6 +601,7 @@ fn snapshot(
         gaps: stats.gaps.load(Ordering::Relaxed),
         missing_samples: stats.missing_samples.load(Ordering::Relaxed),
         out_of_order: stats.out_of_order.load(Ordering::Relaxed),
+        sequence_gaps: stats.sequence_gaps.load(Ordering::Relaxed),
         last_sample_counter: if last < 0 { None } else { Some(last as u64) },
         rcvbuf_bytes: stats.rcvbuf_bytes.load(Ordering::Relaxed),
         signal_peak_sc16: stats.signal_peak_sc16.load(Ordering::Relaxed),
@@ -630,7 +631,7 @@ async fn stats_loop(stats: Arc<Counters>, cfg: Arc<Config>) {
 
         // One line, everything an auditor needs: rate, gaps, every drop path.
         println!(
-            "consumer stats: {:.1} pkt/s | rx={} analyzed={} samples={} | gaps={} missing_samples={} out_of_order={} | parse_errors={} (short={} wrong_type={} trailer={}) size_field_mismatch={} | rows_produced={} published={} publish_dropped={} stft_dropped={} | bridge_errors={} | last_counter={:?} rcvbuf={}",
+            "consumer stats: {:.1} pkt/s | rx={} analyzed={} samples={} | gaps={} missing_samples={} out_of_order={} sequence_gaps={} | parse_errors={} (short={} wrong_type={} trailer={}) size_field_mismatch={} | rows_produced={} published={} publish_dropped={} stft_dropped={} | bridge_errors={} | last_counter={:?} rcvbuf={}",
             snap.packets_per_sec,
             snap.packets_received,
             snap.packets_analyzed,
@@ -638,6 +639,7 @@ async fn stats_loop(stats: Arc<Counters>, cfg: Arc<Config>) {
             snap.gaps,
             snap.missing_samples,
             snap.out_of_order,
+            snap.sequence_gaps,
             snap.parse_errors,
             snap.too_short,
             snap.wrong_type,
@@ -723,4 +725,69 @@ async fn main() {
         .with_graceful_shutdown(shutdown::signal())
         .await
         .expect("stats server error");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn data(seq: u8, counter: u64, samples: usize) -> Vec<u8> {
+        let mut packet = vec![0u8; 20 + 4 * samples];
+        let header = 0x10d0_0000 | ((seq as u32) << 16) | (5 + samples as u32);
+        packet[..4].copy_from_slice(&header.to_be_bytes());
+        packet[4..8].copy_from_slice(&5u32.to_be_bytes());
+        packet[12..20].copy_from_slice(&counter.to_be_bytes());
+        packet
+    }
+
+    #[tokio::test]
+    async fn receive_loop_skips_context_and_tracks_variable_data_packets() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = socket.local_addr().unwrap();
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stats = Arc::new(Counters::default());
+        let cfg = Arc::new(Config {
+            listen: target,
+            bridge_url: String::new(),
+            sample_rate: 2_000_000.0,
+            center_hz: 0.0,
+            publish_hz: 30.0,
+            stats_listen: target,
+            rcvbuf: 0,
+            hexdump_first: 0,
+            capture_fixture: None,
+        });
+        let (tx, mut rx) = mpsc::channel(8);
+        let task = tokio::spawn(receive_loop(socket, tx, Arc::clone(&stats), cfg, Arc::new(AtomicBool::new(false))));
+        let mut context = vec![0u8; 60];
+        context[..4].copy_from_slice(&0x40d9_000fu32.to_be_bytes());
+        let packets = [
+            context.clone(),
+            data(15, 0, 360),
+            context.clone(),
+            data(0, 360, 12),
+            data(2, 384, 8),
+            context[..24].to_vec(),
+            data(3, 392, 1),
+        ];
+        for packet in &packets {
+            sender.send_to(packet, target).await.unwrap();
+        }
+        for _ in 0..4 {
+            tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap().unwrap();
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while stats.packets_analyzed.load(Ordering::Relaxed) < 4 {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert_eq!(stats.packets_received.load(Ordering::Relaxed), 7);
+        assert_eq!(stats.packets_analyzed.load(Ordering::Relaxed), 4);
+        assert_eq!(stats.parse_errors.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.size_field_mismatch.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.gaps.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.missing_samples.load(Ordering::Relaxed), 12);
+        assert_eq!(stats.sequence_gaps.load(Ordering::Relaxed), 1);
+        task.abort();
+    }
 }

@@ -26,9 +26,9 @@ See `docs/plans/` for the master plan (`overview.md`) and per-component plans.
   deployed path, which runs `--source ingest` and reports `stale` rather than
   fabricating rows.
 
-  The wire format is sc16 (not 8-bit), one packet per datagram, 8212 bytes at
-  full rate, header `0x10D00804`; the sender's framing bug that made the first
-  send panic is fixed in `sigproc` (commit `7c8f80e`). The RF path keeps **full
+  The wire format is sc16 (not 8-bit), one packet per datagram, with sizes
+  derived from the datagram. Current sigproc defaults to 360 complex samples
+  per data packet and sends IF Context packets separately. The RF path keeps **full
   16-bit resolution** (`StftProcessor::push_sc16`, dBFS referenced to 32767)
   because the live 915 MHz band peaks at `|sc16| = 46` — an 8-bit `>> 8`
   downshift would collapse it to `{0, -1}` with a DC bias and flatten the
