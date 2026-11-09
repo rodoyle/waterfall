@@ -229,7 +229,9 @@ impl FftBackend {
 /// Decode interleaved signed 8-bit I/Q into Complex<f32>.
 fn bytes_to_complex(bytes: &[i8]) -> Vec<Complex<f32>> {
     bytes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| Complex::new(c[0] as f32, c[1] as f32))
         .collect()
 }
@@ -238,7 +240,9 @@ fn bytes_to_complex(bytes: &[i8]) -> Vec<Complex<f32>> {
 /// resolution — the deployed RF path.
 fn sc16_to_complex(samples: &[i16]) -> Vec<Complex<f32>> {
     samples
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|c| Complex::new(c[0] as f32, c[1] as f32))
         .collect()
 }
@@ -649,8 +653,10 @@ mod tests {
         // Reference: batch path.
         let raw = stft(&bytes);
         let expected_frames: Vec<Vec<f32>> = raw
-            .chunks_exact(FFT_SIZE)
-            .map(to_db)
+            .as_chunks::<FFT_SIZE>()
+            .0
+            .iter()
+            .map(|frame| to_db(frame))
             // Row bins are in natural frequency order (see `Row::bins`), so the
             // raw-FFT reference is rotated to match before comparing.
             .map(|mut bins| {

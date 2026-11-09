@@ -132,7 +132,7 @@ function loadVision(item, index) {
 }
 function releaseMedia() {
   for (const m of media)
-    if (m && m.video) {
+    if (m?.video) {
       m.video.pause();
       m.video.src = "";
     }
@@ -188,7 +188,7 @@ if (gl) {
     for (let i = 0; i < MAX_VISIONS; i++) {
       gl.activeTexture(gl.TEXTURE0 + i);
       const m = media[i];
-      if (m && m.ready && m.video) {
+      if (m?.ready && m.video) {
         // live video frames are re-uploaded every frame
         gl.bindTexture(gl.TEXTURE_2D, m.tex);
         try {
@@ -212,7 +212,7 @@ if (gl) {
       gl.uniform1f(u.aspect[i], m ? m.aspect : 1);
       gl.uniform1f(
         u.reveal[i],
-        m && m.ready ? Math.min((frame - m.revealedAt) * 0.016 * 2.2, 1.6) : 0,
+        m?.ready ? Math.min((frame - m.revealedAt) * 0.016 * 2.2, 1.6) : 0,
       );
     }
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -247,8 +247,7 @@ const mock = (prompt) => ({
 });
 function parseResponse(payload) {
   if (
-    !payload ||
-    payload.version !== "palantir.v1" ||
+    payload?.version !== "palantir.v1" ||
     typeof payload.prompt !== "string" ||
     !Array.isArray(payload.items)
   )
@@ -311,7 +310,7 @@ function render(response) {
     // no-shader fallback: show media as DOM so the page still works
     [...visions.children].forEach((card, i) => {
       const item = response.items[i];
-      if (!item || !item.src) return;
+      if (!item?.src) return;
       if (item.kind === "video") {
         const v = document.createElement("video");
         v.src = item.src;

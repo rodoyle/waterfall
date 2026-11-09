@@ -7,11 +7,12 @@
     "prepare": "husky",
     "precommit": "lint-staged",
     "typecheck": "tsc --noEmit",
-    "format": "biome format --write main.js dataClient.js",
-    "format:check": "biome format main.js dataClient.js",
-    "lint": "biome lint --error-on-warnings main.js dataClient.js",
-    "check": "biome check --error-on-warnings main.js dataClient.js",
-    "check:fix": "biome check --write main.js dataClient.js",
+    "format": "biome format --write . && cargo fmt --all",
+    "format:check": "biome format . && cargo fmt --all --check",
+    "lint": "biome lint --error-on-warnings . && bun run lint:rust",
+    "lint:rust": "cargo clippy --workspace --all-targets --locked -- -D warnings",
+    "check": "biome check --error-on-warnings . && cargo fmt --all --check && bun run lint:rust",
+    "check:fix": "biome check --write . && cargo fmt --all",
     "test": "bun test"
   },
   "devDependencies": {

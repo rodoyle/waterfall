@@ -1,3 +1,4 @@
 bun run precommit || exit 1
+bun run check || exit 1
 bun run typecheck || exit 1
 bun run test

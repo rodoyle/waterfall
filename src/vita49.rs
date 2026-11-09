@@ -191,8 +191,10 @@ impl<'a> Packet<'a> {
     /// would quantize essentially everything to {0, -1}.
     pub fn payload_i16(&self) -> Vec<i16> {
         self.payload
-            .chunks_exact(2)
-            .map(|c| i16::from_be_bytes([c[0], c[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_be_bytes(*c))
             .collect()
     }
 
@@ -211,8 +213,10 @@ impl<'a> Packet<'a> {
     /// garbage with a plausible-looking noise floor.
     pub fn to_i8(&self) -> Vec<i8> {
         self.payload
-            .chunks_exact(2)
-            .map(|c| (i16::from_be_bytes([c[0], c[1]]) >> 8) as i8)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| (i16::from_be_bytes(*c) >> 8) as i8)
             .collect()
     }
 }

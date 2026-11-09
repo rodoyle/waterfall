@@ -292,8 +292,8 @@ fn spike_inspect(n: u64, datagram: &[u8], cfg: &Config) {
             let mut nonzero = 0usize;
             let mut abs_sum = 0u64;
             let mut peak_abs = 0i16;
-            for c in pkt.payload.chunks_exact(2) {
-                let v = i16::from_be_bytes([c[0], c[1]]);
+            for c in pkt.payload.as_chunks::<2>().0 {
+                let v = i16::from_be_bytes(*c);
                 if v != 0 {
                     nonzero += 1;
                 }

@@ -23,16 +23,16 @@ export const DEFAULT_SAMPLE_RATE_HZ = 2_000_000;
  * `sampleRateHz / binCount` wide and bin centres are offset by half a bin.
  */
 export function binToHz(bin, binCount, centerHz, sampleRateHz) {
-    if (!(binCount > 0)) return centerHz;
-    const perBin = sampleRateHz / binCount;
-    return centerHz - sampleRateHz / 2 + (bin + 0.5) * perBin;
+  if (!(binCount > 0)) return centerHz;
+  const perBin = sampleRateHz / binCount;
+  return centerHz - sampleRateHz / 2 + (bin + 0.5) * perBin;
 }
 
 /** Inverse of {@link binToHz} (used to place cursors/markers by frequency). */
 export function hzToBin(hz, binCount, centerHz, sampleRateHz) {
-    if (!(binCount > 0) || !(sampleRateHz > 0)) return 0;
-    const perBin = sampleRateHz / binCount;
-    return (hz - (centerHz - sampleRateHz / 2)) / perBin - 0.5;
+  if (!(binCount > 0) || !(sampleRateHz > 0)) return 0;
+  const perBin = sampleRateHz / binCount;
+  return (hz - (centerHz - sampleRateHz / 2)) / perBin - 0.5;
 }
 
 /**
@@ -42,11 +42,11 @@ export function hzToBin(hz, binCount, centerHz, sampleRateHz) {
  * level (915.000 MHz), which is the resolution a 2 MS/s waterfall shows.
  */
 export function formatHzLabel(hz) {
-    if (!Number.isFinite(hz)) return '--';
-    const abs = Math.abs(hz);
-    if (abs >= 1e6) return `${(hz / 1e6).toFixed(3)} MHz`;
-    if (abs >= 1e3) return `${(hz / 1e3).toFixed(3)} kHz`;
-    return `${hz.toFixed(1)} Hz`;
+  if (!Number.isFinite(hz)) return "--";
+  const abs = Math.abs(hz);
+  if (abs >= 1e6) return `${(hz / 1e6).toFixed(3)} MHz`;
+  if (abs >= 1e3) return `${(hz / 1e3).toFixed(3)} kHz`;
+  return `${hz.toFixed(1)} Hz`;
 }
 
 /**
@@ -56,27 +56,30 @@ export function formatHzLabel(hz) {
  * synthetic development source keeps the old relative behaviour.
  */
 export function axisFromMeta(meta, fallback = {}) {
-    const centerHz = Number(meta && meta.center_hz) || fallback.centerHz || DEFAULT_CENTER_HZ;
-    const sampleRateHz =
-        Number(meta && meta.sample_rate_hz) || fallback.sampleRateHz || DEFAULT_SAMPLE_RATE_HZ;
-    const absolute = Boolean(meta && meta.center_hz && meta.sample_rate_hz);
-    return {
-        centerHz,
-        sampleRateHz,
-        absoluteAxis: absolute,
-        freqMin: centerHz - sampleRateHz / 2,
-        freqMax: centerHz + sampleRateHz / 2,
-        // A log scale over a ~2 MHz window around 915 MHz is meaningless.
-        freqScale: absolute ? 'linear' : fallback.freqScale || 'linear',
-        source: (meta && meta.source) || fallback.source || 'unknown',
-        stale: Boolean(meta && meta.stale),
-    };
+  const centerHz =
+    Number(meta?.center_hz) || fallback.centerHz || DEFAULT_CENTER_HZ;
+  const sampleRateHz =
+    Number(meta?.sample_rate_hz) ||
+    fallback.sampleRateHz ||
+    DEFAULT_SAMPLE_RATE_HZ;
+  const absolute = Boolean(meta?.center_hz && meta.sample_rate_hz);
+  return {
+    centerHz,
+    sampleRateHz,
+    absoluteAxis: absolute,
+    freqMin: centerHz - sampleRateHz / 2,
+    freqMax: centerHz + sampleRateHz / 2,
+    // A log scale over a ~2 MHz window around 915 MHz is meaningless.
+    freqScale: absolute ? "linear" : fallback.freqScale || "linear",
+    source: meta?.source || fallback.source || "unknown",
+    stale: Boolean(meta?.stale),
+  };
 }
 
 /** Apply `/meta` to the live config object in place (returns it for chaining). */
 export function applyMetaToConfig(config, meta) {
-    Object.assign(config, axisFromMeta(meta, config));
-    return config;
+  Object.assign(config, axisFromMeta(meta, config));
+  return config;
 }
 
 /**
@@ -86,17 +89,19 @@ export function applyMetaToConfig(config, meta) {
  * and 1 at the top, so the renderer stays layout-only.
  */
 export function axisLabels(config, count = 5) {
-    const labels = [];
-    for (let i = 0; i < count; i++) {
-        const fraction = count === 1 ? 0 : i / (count - 1);
-        const hz = config.freqMin + (config.freqMax - config.freqMin) * fraction;
-        labels.push({
-            hz,
-            text: config.absoluteAxis ? formatHzLabel(hz) : `${hz.toFixed(hz >= 1000 ? 0 : 1)} Hz`,
-            fraction,
-        });
-    }
-    return labels;
+  const labels = [];
+  for (let i = 0; i < count; i++) {
+    const fraction = count === 1 ? 0 : i / (count - 1);
+    const hz = config.freqMin + (config.freqMax - config.freqMin) * fraction;
+    labels.push({
+      hz,
+      text: config.absoluteAxis
+        ? formatHzLabel(hz)
+        : `${hz.toFixed(hz >= 1000 ? 0 : 1)} Hz`,
+      fraction,
+    });
+  }
+  return labels;
 }
 
 /**
@@ -113,41 +118,41 @@ export function axisLabels(config, count = 5) {
  * degenerate range, or `null` when there is nothing usable.
  */
 export function autoIntensityRange(
-    rows,
-    { marginDb = 4, clampMin = -160, clampMax = 0, minSpanDb = 12 } = {}
+  rows,
+  { marginDb = 4, clampMin = -160, clampMax = 0, minSpanDb = 12 } = {},
 ) {
-    let lo = Infinity;
-    let hi = -Infinity;
-    for (const row of rows) {
-        for (let i = 0; i < row.length; i++) {
-            const v = row[i];
-            if (!Number.isFinite(v)) continue;
-            if (v < lo) lo = v;
-            if (v > hi) hi = v;
-        }
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const row of rows) {
+    for (let i = 0; i < row.length; i++) {
+      const v = row[i];
+      if (!Number.isFinite(v)) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
     }
-    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
 
-    const min = Math.max(clampMin, lo - marginDb);
-    let max = Math.min(clampMax, hi + marginDb);
-    if (max - min < minSpanDb) max = Math.min(clampMax, min + minSpanDb);
-    if (max <= min) return null;
-    return { min, max };
+  const min = Math.max(clampMin, lo - marginDb);
+  let max = Math.min(clampMax, hi + marginDb);
+  if (max - min < minSpanDb) max = Math.min(clampMax, min + minSpanDb);
+  if (max <= min) return null;
+  return { min, max };
 }
 
 const api = {
-    binToHz,
-    hzToBin,
-    formatHzLabel,
-    axisFromMeta,
-    applyMetaToConfig,
-    axisLabels,
-    autoIntensityRange,
-    DEFAULT_CENTER_HZ,
-    DEFAULT_SAMPLE_RATE_HZ,
+  binToHz,
+  hzToBin,
+  formatHzLabel,
+  axisFromMeta,
+  applyMetaToConfig,
+  axisLabels,
+  autoIntensityRange,
+  DEFAULT_CENTER_HZ,
+  DEFAULT_SAMPLE_RATE_HZ,
 };
 
 // Classic scripts (main.js) read this global; module importers use the exports.
-if (typeof globalThis !== 'undefined') globalThis.WaterfallAxis = api;
+if (typeof globalThis !== "undefined") globalThis.WaterfallAxis = api;
 
 export default api;

@@ -112,20 +112,27 @@ bin/check_mlx.sh           # verify the MLX build environment
 
 Open `http://127.0.0.1:4780/palantir.html` after starting the bridge server to try the second frontend view. It is a vanilla WebGL prototype: submit a plain-text question, watch the mist resolve, and use Reset to replay. The mock adapter in `palantir.js` follows `docs/palantir-response.schema.json` (`palantir.v1`), whose ordered items support `image`, `video`, `video-frame`, and `raster-text` entries with `src`, `caption`, and optional `effect`. Replace `mock()` with the backend fetch when the response endpoint is available.
 
-## Front-end formatting and linting
+## Formatting and linting
 
-Install the pinned JS tooling with `bun install --frozen-lockfile`. Biome handles
-formatting and linting for `main.js` and `dataClient.js` (two-space indentation,
-double quotes, semicolons, and consistent line wrapping). Its parser supports
-both JavaScript and TypeScript; add future files to `biome.json` and the scripts
-when bringing them under the same checks. The two browser globals supplied by
-`axis.js` and `dataClient.js` are declared in the config; undeclared names are errors.
+Install the pinned JS tooling with `bun install --frozen-lockfile` and ensure
+Rust's `rustfmt` and `clippy` components are installed (`rustup component add
+rustfmt clippy`). Biome discovers JavaScript/TypeScript files recursively,
+including JSX/TSX and `.mjs`/`.cjs` scripts. Formatting uses two-space indentation,
+double quotes, semicolons, and consistent line wrapping. Git-ignored output and
+agent-tooling directories are excluded. New application files need no allowlist
+or script changes. The browser globals supplied by `axis.js` and `dataClient.js`
+are declared in the config; other undeclared names are errors.
+
+Rust uses `cargo fmt --all` and Clippy across all workspace targets (libraries,
+binaries, examples, and tests), with warnings treated as errors. New Rust modules
+and Cargo targets are covered automatically. Optional MLX-feature builds remain
+a separate platform-specific check.
 
 ```bash
-bun run format        # format both files in place
-bun run lint          # lint only; warnings fail the check
-bun run check         # non-mutating formatter + linter check (also suitable for CI)
-bun run check:fix     # format and apply safe lint fixes
+bun run format        # format all JS/TS and Rust sources in place
+bun run lint          # Biome + Clippy; warnings fail the check
+bun run check         # Biome + rustfmt check + Clippy (also suitable for CI)
+bun run check:fix     # JS/TS safe fixes + JS/TS and Rust formatting
 bun test              # front-end tests
 ```
 
@@ -133,11 +140,13 @@ Use the Biome editor extension to format on save with the same configuration.
 
 `bun install --frozen-lockfile` also installs the Husky pre-commit hook via the
 `prepare` script (run `bun run prepare` once in an existing checkout). Each commit
-runs Biome on staged changes to `main.js` and `dataClient.js` through lint-staged,
-automatically re-staging formatting and safe fixes while preserving unstaged
-edits. Remaining lint errors or warnings block the commit. The hook then runs
-`bun run typecheck` and `bun test`; either failing also blocks the commit.
-Run `bun run check` for a non-mutating check of both files, or
+runs Biome on all staged JS/TS files through lint-staged, automatically re-staging
+formatting and safe fixes while preserving unstaged edits. It then checks all
+JS/TS sources, Rust formatting, and Clippy, followed by `bun run typecheck` and
+`bun test`. Formatting failures, lint errors, warnings, or failing tests block
+the commit. Rust formatting is check-only in the hook: run `bun run format` and
+stage the changes if needed, so partially staged Rust files are not rewritten.
+Run `bun run check` for a non-mutating repository-wide check, or
 `bun run precommit` to manually run the staged-file formatter/linter.
 
 ## Front end
