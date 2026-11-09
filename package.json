@@ -4,6 +4,9 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "prepare": "husky",
+    "precommit": "lint-staged",
+    "typecheck": "tsc --noEmit",
     "format": "biome format --write main.js dataClient.js",
     "format:check": "biome format main.js dataClient.js",
     "lint": "biome lint --error-on-warnings main.js dataClient.js",
@@ -14,6 +17,8 @@
   "devDependencies": {
     "@biomejs/biome": "2.6.6",
     "@types/bun": "latest",
+    "husky": "9.1.7",
+    "lint-staged": "17.6.0",
     "playwright": "^1.63.0"
   },
   "peerDependencies": {

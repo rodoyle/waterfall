@@ -130,7 +130,15 @@ bun test              # front-end tests
 ```
 
 Use the Biome editor extension to format on save with the same configuration.
-Run `bun run check` before committing to avoid style-only merge conflicts.
+
+`bun install --frozen-lockfile` also installs the Husky pre-commit hook via the
+`prepare` script (run `bun run prepare` once in an existing checkout). Each commit
+runs Biome on staged changes to `main.js` and `dataClient.js` through lint-staged,
+automatically re-staging formatting and safe fixes while preserving unstaged
+edits. Remaining lint errors or warnings block the commit. The hook then runs
+`bun run typecheck` and `bun test`; either failing also blocks the commit.
+Run `bun run check` for a non-mutating check of both files, or
+`bun run precommit` to manually run the staged-file formatter/linter.
 
 ## Front end
 
