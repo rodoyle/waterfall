@@ -1,4 +1,5 @@
 {
+  "exclude": ["node_modules", "target", ".pi", ".agents", ".pi-glla", ".zvec-grep"],
   "compilerOptions": {
     // Environment setup & latest features
     "lib": ["ESNext"],

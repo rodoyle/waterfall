@@ -72,7 +72,7 @@ Build-env helper `bin/check_mlx.sh` exists for the MLX side only.
   `#[cfg(feature = "mlx")]`-gated `mlx_integration` module unconditionally
   (E0433 unresolved module + E0282 type annotation). Fix: gate the `Mlx` variant
   and its match arm on `#[cfg(feature = "mlx")]`.
-- No binary, no server, no connection to the consumer or front end.
+- Binary and bridge server — **DONE (M1).** See `src/main.rs` (WebSocket push + REST /chunks).
 
 ## Cross-cutting gaps (what links everything together)
 

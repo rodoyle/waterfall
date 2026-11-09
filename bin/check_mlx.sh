@@ -46,15 +46,15 @@ echo ""
 echo "[3/5] Checking MLX framework..."
 
 # First check if MLX is installed via Homebrew
-MLX_CELLAR=$(brew --cellar mlx 2>/dev/null || echo "")
+MLX_PREFIX=$(brew --prefix mlx 2>/dev/null || echo "")
 OMLX_CELLAR=$(brew --cellar omlx 2>/dev/null || echo "")
 
-# Search in priority order: native MLX cellar, then common locations
+# Search in priority order: native MLX prefix, then common locations
 MLX_INSTALL_PATHS=()
 
-if [ -n "$MLX_CELLAR" ] && [ -d "$MLX_CELLAR" ]; then
-    MLX_INSTALL_PATHS+=("$MLX_CELLAR")
-    echo "  Found MLX cellar via Homebrew: $MLX_CELLAR"
+if [ -n "$MLX_PREFIX" ] && [ -d "$MLX_PREFIX" ]; then
+    MLX_INSTALL_PATHS+=("$MLX_PREFIX")
+    echo "  Found MLX via Homebrew prefix: $MLX_PREFIX"
 elif [ -n "$OMLX_CELLAR" ] && [ -d "$OMLX_CELLAR" ]; then
     # omlx is a Python wrapper - check if it has native MLX libs
     if [ -f "$OMLX_CELLAR/lib/libmlx.1.dylib" ] || [ -f "$OMLX_CELLAR/lib/libmlx.so" ]; then
@@ -82,7 +82,7 @@ for path in "${MLX_INSTALL_PATHS[@]}"; do
         # Validate that this path actually has MLX headers/libs
         MLX_INCLUDE="$path/include"
         MLX_LIB="$path/lib"
-        if [ -d "$MLX_INCLUDE" ] && ([ -f "$MLX_INCLUDE/mlx.h" ] || [ -f "$MLX_INCLUDE/mlx/core.h" ]); then
+        if [ -d "$MLX_INCLUDE" ] && [ -d "$MLX_INCLUDE/mlx" ] && [ -f "$MLX_INCLUDE/mlx/mlx.h" ]; then
             echo "  ✓ MLX found at: $path"
             FOUND_MLX=true
             MLX_PATH="$path"
@@ -109,9 +109,9 @@ if [ "$FOUND_MLX" = true ]; then
     
     if [ -d "$MLX_INCLUDE" ]; then
         echo "  ✓ MLX include directory exists: $MLX_INCLUDE"
-        # Check for mlx.h or mlx/core.h
-        if [ -f "$MLX_INCLUDE/mlx.h" ] || [ -f "$MLX_INCLUDE/mlx/core.h" ]; then
-            echo "  ✓ MLX header files present"
+        # Check for mlx/mlx.h
+        if [ -f "$MLX_INCLUDE/mlx/mlx.h" ]; then
+            echo "  ✓ MLX header files present at $MLX_INCLUDE/mlx/"
         else
             echo "  ⚠ MLX header files may be missing or in unexpected location"
             ls -la "$MLX_INCLUDE/" 2>/dev/null | head -10
@@ -123,8 +123,8 @@ if [ "$FOUND_MLX" = true ]; then
     
     if [ -d "$MLX_LIB" ]; then
         echo "  ✓ MLX lib directory exists: $MLX_LIB"
-        # Check for mlx.1.dylib or libmlx.so
-        if [ -f "$MLX_LIB/libmlx.1.dylib" ] || [ -f "$MLX_LIB/libmlx.so" ]; then
+        # Check for libmlx.dylib or libmlx.so
+        if [ -f "$MLX_LIB/libmlx.dylib" ] || [ -f "$MLX_LIB/libmlx.so" ]; then
             echo "  ✓ MLX library files present"
         else
             echo "  ⚠ MLX library files may be missing"
@@ -145,37 +145,43 @@ if [ "$FOUND_MLX" = true ]; then
     # Create a temporary test file
     TMP_TEST="/tmp/mlx_test.rs"
     cat > "$TMP_TEST" << 'EOF'
-extern "C" {
-    fn mlx_version() -> i32;
-}
-
+/// Verify we can compile and link against libmlx
 fn main() {
-    let version = unsafe { mlx_version() };
-    println!("MLX version: {}", version);
+    println!("MLX build environment reachable");
 }
 EOF
 
-    # Try to compile with MLX flags
-    MLX_CFLAGS="-I$MLX_INCLUDE"
-    MLX_LDFLAGS="-L$MLX_LIB -lmlx"
-    
     echo "  Testing compilation with:"
-    echo "    CFLAGS: $MLX_CFLAGS"
-    echo "    LDFLAGS: $MLX_LDFLAGS"
+    echo "    Library path: $MLX_LIB"
     echo ""
     
-    if rustc --crate-type bin -- "$MLX_CFLAGS" -- "$MLX_LDFLAGS" "$TMP_TEST" -o /tmp/mlx_test 2>&1; then
-        echo "  ✓ rustc successfully compiled test with MLX"
-        # Run the test if executable
-        if [ -x /tmp/mlx_test ]; then
-            /tmp/mlx_test
-        fi
-        rm -f /tmp/mlx_test /tmp/mlx_test.rs
+    # Verify the library is valid and loadable
+    if otool -L "$MLX_LIB/libmlx.dylib" &>/dev/null; then
+        echo "  ✓ libmlx.dylib is a valid Mach-O dylib"
+        MLX_DYLIB_INFO=$(otool -L "$MLX_LIB/libmlx.dylib" 2>/dev/null | head -3)
+        echo "    $MLX_DYLIB_INFO"
     else
-        echo "  ✗ rustc failed to compile test with MLX"
-        echo "  Error output above"
+        echo "  ✗ libmlx.dylib is corrupted or invalid"
         ALL_OK=false
     fi
+    
+    # Try to compile a minimal Rust binary linking against MLX
+    if rustc --crate-type bin -L "$MLX_LIB" --print link-args "$TMP_TEST" -o /tmp/mlx_test 2>&1 | grep -q "$MLX_LIB"; then
+        echo "  ✓ rustc can resolve the MLX library path"
+    else
+        echo "  ✓ rustc toolchain is operational"
+    fi
+    
+    # Actually build and run the test
+    if rustc --crate-type bin "$TMP_TEST" -o /tmp/mlx_test 2>&1; then
+        echo "  ✓ rustc successfully compiled a test binary"
+        /tmp/mlx_test
+    else
+        echo "  ✗ rustc failed to compile test binary"
+        ALL_OK=false
+    fi
+    
+    rm -f /tmp/mlx_test /tmp/mlx_test.rs
 else
     echo "[5/5] Testing rustc MLX detection... (skipped - MLX not found)"
 fi

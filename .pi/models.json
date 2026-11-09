@@ -1,0 +1,28 @@
+{
+  "providers": {
+    "pokee": {
+      "baseUrl": "https://api.pokee.ai/v1/",
+      "api": "openai-completions",
+      "apiKey": "pk-live-lF8Gng4D94sAaFdKQ0bYzlWKwyJ9QlsX",
+      "models": [
+        {
+          "id": "pokee-issac",
+          "name": "Pokee Issac",
+          "reasoning": true,
+          "input": ["text"],
+          "contextWindow": 10000000,
+          "maxTokens": 16384,
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "compat": {
+            "thinkingFormat": "reasoning_effort"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -3,7 +3,16 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "format": "biome format --write main.js dataClient.js",
+    "format:check": "biome format main.js dataClient.js",
+    "lint": "biome lint --error-on-warnings main.js dataClient.js",
+    "check": "biome check --error-on-warnings main.js dataClient.js",
+    "check:fix": "biome check --write main.js dataClient.js",
+    "test": "bun test"
+  },
   "devDependencies": {
+    "@biomejs/biome": "2.6.6",
     "@types/bun": "latest",
     "playwright": "^1.63.0"
   },

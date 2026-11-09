@@ -112,6 +112,26 @@ bin/check_mlx.sh           # verify the MLX build environment
 
 Open `http://127.0.0.1:4780/palantir.html` after starting the bridge server to try the second frontend view. It is a vanilla WebGL prototype: submit a plain-text question, watch the mist resolve, and use Reset to replay. The mock adapter in `palantir.js` follows `docs/palantir-response.schema.json` (`palantir.v1`), whose ordered items support `image`, `video`, `video-frame`, and `raster-text` entries with `src`, `caption`, and optional `effect`. Replace `mock()` with the backend fetch when the response endpoint is available.
 
+## Front-end formatting and linting
+
+Install the pinned JS tooling with `bun install --frozen-lockfile`. Biome handles
+formatting and linting for `main.js` and `dataClient.js` (two-space indentation,
+double quotes, semicolons, and consistent line wrapping). Its parser supports
+both JavaScript and TypeScript; add future files to `biome.json` and the scripts
+when bringing them under the same checks. The two browser globals supplied by
+`axis.js` and `dataClient.js` are declared in the config; undeclared names are errors.
+
+```bash
+bun run format        # format both files in place
+bun run lint          # lint only; warnings fail the check
+bun run check         # non-mutating formatter + linter check (also suitable for CI)
+bun run check:fix     # format and apply safe lint fixes
+bun test              # front-end tests
+```
+
+Use the Biome editor extension to format on save with the same configuration.
+Run `bun run check` before committing to avoid style-only merge conflicts.
+
 ## Front end
 
 Vanilla JS + HTML5 Canvas (no React). `dataClient.js` connects the WebSocket,
