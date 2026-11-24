@@ -81,6 +81,50 @@ forever; it retries only while unresolved. It cached `10.43.78.205`. So:
    and re-apply the overlay.
 5. Delete `kustomize/compat/` from the repo.
 
+## The multicast copy (additive)
+
+sigproc sends the narrowband VITA49 stream **twice**: the unicast copy this
+stack has always consumed, and a LAN multicast copy to `239.255.49.2:4820`
+(TTL 1) from rpi-four-2 (`192.168.0.55`). The consumer joins that group and
+keeps the unicast bind exactly as it was, so the unicast path remains the
+rollback path and nothing depends on multicast working.
+
+Why `hostNetwork: true`: a pod-network namespace cannot receive LAN multicast
+through the CNI, so the group is only reachable from the node's own network
+namespace. Two consequences are load-bearing in `kustomize/base/consumer.yaml`:
+
+- `dnsPolicy: ClusterFirstWithHostNet` is **mandatory**; without it the pod
+  cannot resolve `orbweaver-ui.default.svc.cluster.local` and every row POST
+  fails (an empty waterfall, not a degraded one).
+- `strategy: Recreate` is mandatory for the same reason a host port always is:
+  a RollingUpdate cannot bind 4820 on a node that the old pod still holds.
+
+The join interface comes from `status.hostIP`, which is the node's LAN address
+on this cluster (every node is single-homed on `192.168.0.0/24`: med-laptop-2 =
+`.48`, med-laptop-1 = `.20`, sigproc's node rpi-four-2 = `.55`). Reading it from
+the API keeps the join correct if the pod moves between amd64 nodes.
+
+A failed join is never fatal: the consumer logs the error, reports it as
+`multicast_join_error` in `/stats`, and keeps serving unicast. While both paths
+deliver, the second copy of each datagram is dropped before analysis and counted
+as `duplicates_dropped` (a duplicate is not reordering, so `out_of_order` and
+`gaps` stay at 0).
+
+Proof that the group is live — with both paths running, the expected signature
+is `duplicates_dropped ≈ packets_received / 2`:
+
+```bash
+kubectl -n default exec deploy/orbweaver-consumer -- \
+  wget -qO- http://127.0.0.1:4830/stats
+# look for: multicast_joined=true, multicast_join_error=null,
+#           duplicates_dropped climbing at about half of packets_received
+```
+
+`multicast_joined=true` with `duplicates_dropped=0` means the membership exists
+but no multicast datagram is arriving — an L2/CNI/interface problem, not a
+parser problem. Retire the unicast path only after the duplicate rate is stable
+and `duplicate_mismatch` stays at 0.
+
 ## Zero-interruption apply order
 
 The RF path must never point at a Service with no ready endpoints, so:

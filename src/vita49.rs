@@ -119,9 +119,9 @@ impl std::fmt::Display for ParseError {
                 write!(f, "datagram too short: {len} bytes, need at least {need}")
             }
             ParseError::ContextPacket => write!(f, "IF context packet (no samples)"),
-            ParseError::ContextLengthMismatch { declared, actual } => write!(
-                f, "context declares {declared} bytes but {actual} arrived"
-            ),
+            ParseError::ContextLengthMismatch { declared, actual } => {
+                write!(f, "context declares {declared} bytes but {actual} arrived")
+            }
             ParseError::UnsupportedPacketType(t) => {
                 write!(
                     f,
@@ -375,11 +375,17 @@ impl DataStreamTracker {
                 self.sequence_gaps += 1;
             }
         }
-        if state.samples.last_counter().is_none_or(|last| counter > last) {
+        if state
+            .samples
+            .last_counter()
+            .is_none_or(|last| counter > last)
+        {
             state.sequence = Some(packet.header.packet_count);
         }
         let previous_out_of_order = state.samples.out_of_order;
-        let gap = state.samples.observe(counter, packet.complex_samples() as u64);
+        let gap = state
+            .samples
+            .observe(counter, packet.complex_samples() as u64);
         self.out_of_order += state.samples.out_of_order - previous_out_of_order;
         if let Some(gap) = gap {
             self.gaps += 1;
@@ -547,10 +553,7 @@ mod tests {
         let mut ctx = full_packet(0, 0);
         // Context packet (type 0x4) must never be accepted as I/Q.
         ctx[0] = 0x40;
-        assert_eq!(
-            parse_datagram(&ctx).unwrap_err(),
-            ParseError::ContextPacket
-        );
+        assert_eq!(parse_datagram(&ctx).unwrap_err(), ParseError::ContextPacket);
 
         let mut trailer = full_packet(0, 0);
         let header = u32::from_be_bytes([trailer[0], trailer[1], trailer[2], trailer[3]]);
@@ -608,7 +611,9 @@ mod tests {
         assert_eq!(t.gaps, 0);
 
         // A real dropout of three packets.
-        let gap = t.observe(7167 + 1024 + 2048 * 3, 2048).expect("gap detected");
+        let gap = t
+            .observe(7167 + 1024 + 2048 * 3, 2048)
+            .expect("gap detected");
         assert_eq!(gap.missing_samples, 2048 * 3);
         assert_eq!(t.gaps, 1);
         assert_eq!(t.missing_samples, 2048 * 3);
@@ -655,26 +660,46 @@ mod tests {
         ];
         for (i, bytes) in packets.iter().enumerate() {
             if i == 2 {
-                assert_eq!(parse_datagram(&context).unwrap_err(), ParseError::ContextPacket);
+                assert_eq!(
+                    parse_datagram(&context).unwrap_err(),
+                    ParseError::ContextPacket
+                );
             }
             let packet = parse_datagram(bytes).expect("data packet");
             assert!(packet.size_field_matches);
             assert_eq!(tracker.observe(&packet, SAMPLE_RATE), None);
         }
-        assert_eq!((tracker.gaps, tracker.missing_samples, tracker.sequence_gaps), (0, 0, 0));
+        assert_eq!(
+            (tracker.gaps, tracker.missing_samples, tracker.sequence_gaps),
+            (0, 0, 0)
+        );
 
         let dropped = data_packet(10, 3, 1092, 9);
-        let gap = tracker.observe(&parse_datagram(&dropped).unwrap(), SAMPLE_RATE).unwrap();
+        let gap = tracker
+            .observe(&parse_datagram(&dropped).unwrap(), SAMPLE_RATE)
+            .unwrap();
         assert_eq!(gap.missing_samples, 360);
-        assert_eq!((tracker.gaps, tracker.missing_samples, tracker.sequence_gaps), (1, 360, 1));
+        assert_eq!(
+            (tracker.gaps, tracker.missing_samples, tracker.sequence_gaps),
+            (1, 360, 1)
+        );
 
         // A late packet or duplicate must not move the data baseline backwards.
         let late = data_packet(10, 2, 732, 360);
-        assert_eq!(tracker.observe(&parse_datagram(&late).unwrap(), SAMPLE_RATE), None);
+        assert_eq!(
+            tracker.observe(&parse_datagram(&late).unwrap(), SAMPLE_RATE),
+            None
+        );
         assert_eq!(tracker.out_of_order, 1);
-        assert_eq!(tracker.observe(&parse_datagram(&dropped).unwrap(), SAMPLE_RATE), None);
+        assert_eq!(
+            tracker.observe(&parse_datagram(&dropped).unwrap(), SAMPLE_RATE),
+            None
+        );
         let next = data_packet(10, 4, 1101, 3);
-        assert_eq!(tracker.observe(&parse_datagram(&next).unwrap(), SAMPLE_RATE), None);
+        assert_eq!(
+            tracker.observe(&parse_datagram(&next).unwrap(), SAMPLE_RATE),
+            None
+        );
         assert_eq!((tracker.gaps, tracker.sequence_gaps), (1, 1));
     }
 
@@ -682,7 +707,12 @@ mod tests {
     fn truncated_context_is_not_silently_accepted() {
         let mut context = vec![0u8; 24];
         context[..4].copy_from_slice(&0x40d0_000fu32.to_be_bytes());
-        assert_eq!(parse_datagram(&context).unwrap_err(),
-            ParseError::ContextLengthMismatch { declared: 60, actual: 24 });
+        assert_eq!(
+            parse_datagram(&context).unwrap_err(),
+            ParseError::ContextLengthMismatch {
+                declared: 60,
+                actual: 24
+            }
+        );
     }
 }

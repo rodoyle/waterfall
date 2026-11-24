@@ -10,6 +10,11 @@
 # keeps that label on its pods while ALSO carrying the canonical
 # `app.kubernetes.io/name: orbweaver-consumer`. Both Services therefore select
 # the same pods and the rename is invisible to sigproc. See deploy/README.md.
+#
+# MULTICAST (additive): this pod runs `hostNetwork: true` because sigproc also
+# sends a LAN multicast copy (239.255.49.2:4820, TTL 1) that a pod-network
+# namespace cannot receive. The unicast path is unchanged and remains the
+# rollback path; see deploy/README.md ("The multicast copy").
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +26,13 @@ metadata:
     app.kubernetes.io/component: middleware
 spec:
   replicas: 1
+  # hostNetwork + a fixed host port means a RollingUpdate cannot start
+  # the new pod while the old one still holds 4820 on that node: it
+  # would deadlock on `bind: address already in use`. Recreate stops
+  # the old pod first (a few seconds with no waterfall; the stream
+  # resumes on its own once bound).
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: orbweaver-consumer
@@ -36,6 +48,19 @@ spec:
         # vita49_dest_host has been migrated (deploy/README.md has the steps).
         app: waterfall-consumer
     spec:
+      # LAN MULTICAST needs the node's network namespace: sigproc sends
+      # the multicast copy (239.255.49.2, TTL 1) from rpi-four-2 on
+      # 192.168.0.55, and a pod-network namespace cannot receive LAN
+      # multicast through the CNI. The unicast copy is unaffected
+      # because the Service DNAT lands on the node IP, which is now also
+      # this pod's address.
+      hostNetwork: true
+      # MANDATORY with hostNetwork: the default `Default` policy uses the
+      # node resolver, so `orbweaver-ui.default.svc.cluster.local` would
+      # not resolve and every row POST would fail. This is the one way
+      # this change could leave the waterfall empty rather than merely
+      # degraded.
+      dnsPolicy: ClusterFirstWithHostNet
       # Placement is a CONSTRAINT, not a pin: any amd64 node that is not the SDR
       # node (rpi-four-2) or the control plane (sab-laptop-1). amd64 is required
       # by the image anyway; the NotIn keeps the live RF stream off the SDR node
@@ -101,6 +126,25 @@ spec:
           env:
             - name: RUST_LOG
               value: info
+            # ADDITIVE LAN multicast copy of the same VITA49 stream.
+            # sigproc sends it in addition to the unicast copy, to the
+            # same port, so one socket receives both, and the second
+            # copy is dropped and counted (`duplicates_dropped` in
+            # /stats). Multicast is never required: a failed join logs
+            # and falls back to unicast only.
+            #
+            # `status.hostIP` is the node's LAN address on this cluster
+            # (every node is single-homed on 192.168.0.0/24:
+            # med-laptop-2 = .48, sigproc's node rpi-four-2 = .55),
+            # which is exactly the local address IP_ADD_MEMBERSHIP
+            # needs. Reading it from the API keeps the join correct if
+            # the pod is rescheduled to another amd64 node.
+            - name: WATERFALL_MULTICAST_GROUP
+              value: "239.255.49.2"
+            - name: WATERFALL_MULTICAST_IFACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: false
