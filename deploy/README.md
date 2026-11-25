@@ -114,12 +114,14 @@ proposing anything here.
 
 It is **not ready**, and the reason is not in this repo. Criterion 4 —
 "multicast costs exactly one copy per datagram" — is FAILING: the multicast
-sender emits two copies per datagram, so the additive path costs two datagrams
-on the wire for every one the unicast path carries. The consumer absorbs this
-correctly (`duplicate_mismatch` stays 0), but "byte-identical multicast proven"
-is not the same claim as "multicast proven", and retirement needs the second.
-What closes it is the sender-side bridge/echo check named in that document, not
-a change here.
+sender's application layer is not at fault: its emit record is 1:1 per datagram.
+The second frame is injected on the WIRED segment by an L2 path — a wired
+receiver sees 2.0 copies per datagram while a wireless receiver sees 1.0 at the
+same moment, which places the duplicate in the bridge/repeater topology, not the
+sender and not the receiver. The consumer absorbs this correctly
+(`duplicate_mismatch` stays 0), but "byte-identical multicast proven" is not the
+same claim as "multicast proven", and retirement needs the second. What closes it
+is a LAN topology fix owned by infra, not a change here.
 
 Do not add a retirement step to this file until that document reports criterion 4
 passing. The unicast bind remains the rollback path and nothing in this stack
