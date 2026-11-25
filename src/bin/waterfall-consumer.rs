@@ -977,11 +977,57 @@ async fn stats_loop(stats: Arc<Counters>, cfg: Arc<Config>) {
     }
 }
 
+/// Packet-rate meter for the `/stats` endpoint.
+///
+/// `stats_loop` computes its own 10 s rate, but that is a local variable for
+/// the log line, not shared state. `/stats` therefore measures between
+/// requests. The first request has no previous sample and falls back to the
+/// average since start, so the reported rate is never a fabricated zero.
+struct RateMeter {
+    start: Instant,
+    last_at: Instant,
+    last_packets: u64,
+}
+
+impl RateMeter {
+    fn new(start: Instant) -> Self {
+        Self {
+            start,
+            last_at: start,
+            last_packets: 0,
+        }
+    }
+
+    /// Returns `(uptime, window, window_packets)` for the current request.
+    fn observe(&mut self, packets: u64) -> (Duration, Duration, u64) {
+        self.observe_at(Instant::now(), packets)
+    }
+
+    /// [`RateMeter::observe`] against an explicit clock reading.
+    ///
+    /// Split out so the rate arithmetic can be tested without sleeping: the
+    /// monotonic clock is not the thing under test here.
+    fn observe_at(&mut self, now: Instant, packets: u64) -> (Duration, Duration, u64) {
+        let uptime = now.duration_since(self.start);
+        let window = now.duration_since(self.last_at);
+        let window_packets = packets.saturating_sub(self.last_packets);
+        self.last_at = now;
+        self.last_packets = packets;
+        if window.as_secs_f64() < 1.0 {
+            // Back-to-back requests would divide by a near-zero window and
+            // report a nonsense rate; the lifetime average is the honest
+            // fallback for both uptime and window.
+            return (uptime, uptime, packets);
+        }
+        (uptime, window, window_packets)
+    }
+}
 #[tokio::main]
 async fn main() {
     let cfg = Arc::new(load_config());
     let stats = Arc::new(Counters::default());
     let batch = Arc::new(Mutex::new(RowBatch::new(64)));
+    let meter = Arc::new(Mutex::new(RateMeter::new(Instant::now())));
 
     let socket = bind_receive_socket(&cfg, &stats)
         .await
@@ -1017,13 +1063,26 @@ async fn main() {
     // Stats/health endpoint for the middleware tier.
     let stats_state = Arc::clone(&stats);
     let cfg_state = Arc::clone(&cfg);
+    let meter_state = Arc::clone(&meter);
     let app = Router::new()
         .route(
             "/stats",
             get(move || {
                 let stats = Arc::clone(&stats_state);
                 let cfg = Arc::clone(&cfg_state);
-                async move { Json(snapshot(&stats, &cfg, Duration::ZERO, Duration::ZERO, 0)) }
+                let meter = Arc::clone(&meter_state);
+                async move {
+                    // Uptime and rate come from the meter, not from constants:
+                    // `/stats` previously reported `uptime_secs: 0` and
+                    // `packets_per_sec: 0.0` forever, which made the two fields
+                    // useless for spotting a stalled stream.
+                    let packets = stats.packets_received.load(Ordering::Relaxed);
+                    let (uptime, window, window_packets) = {
+                        let mut meter = meter.lock().expect("rate meter mutex poisoned");
+                        meter.observe(packets)
+                    };
+                    Json(snapshot(&stats, &cfg, uptime, window, window_packets))
+                }
             }),
         )
         .route("/healthz", get(|| async { "ok" }));
@@ -1325,5 +1384,40 @@ mod tests {
         );
         assert_eq!(stats.gaps.load(Ordering::Relaxed), 0);
         task.abort();
+    }
+
+    #[test]
+    fn rate_meter_reports_real_values_not_zeros() {
+        // The bug this guards: `/stats` used to pass Duration::ZERO for both
+        // uptime and window, so a live stream reported uptime_secs=0 and
+        // packets_per_sec=0.0 forever — indistinguishable from a dead stream.
+        // The clock is injected so this asserts arithmetic, not scheduler speed.
+        let start = Instant::now();
+        let mut meter = RateMeter::new(start);
+
+        // First sample: no previous reading, so the sub-second guard reports the
+        // lifetime average rather than dividing by an empty window.
+        let first = start + Duration::from_secs(5);
+        assert_eq!(
+            meter.observe_at(first, 1_000),
+            (Duration::from_secs(5), Duration::from_secs(5), 1_000),
+            "first sample falls back to the lifetime average"
+        );
+
+        // Second sample 2 s later: uptime spans the whole run, the window is
+        // only the last interval, and the count is the delta between samples.
+        let second = first + Duration::from_secs(2);
+        assert_eq!(
+            meter.observe_at(second, 1_347),
+            (Duration::from_secs(7), Duration::from_secs(2), 347),
+            "later samples report the interval, not the run total"
+        );
+
+        // A counter that appears to go backwards must not underflow into a
+        // gigantic rate; saturating_sub floors the delta at zero.
+        assert_eq!(
+            meter.observe_at(second + Duration::from_secs(3), 1_347).2,
+            0
+        );
     }
 }
