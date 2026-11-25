@@ -51,6 +51,10 @@ the device before spending a CNI migration to work around it. A config change on
 one device may fix the duplicate outright, and it establishes whether the
 dual-homed sender is the sole trigger.
 
+**Authoritative record:** `infra`'s `docs/plans/multicast-duplicate-phase0.md`
+(commit f8bedbb). It owns the gate, the evidence table and the runbook rule. This
+file is the cross-repo summary — where the two disagree, that document wins.
+
 1. Use the frame-identity tooling (`scripts/diag/mcast_frame_identity.py` in
    `infra`) to capture on the wired segment and confirm the duplicate headers.
 2. Walk the LAN for a device with both a wireless and a wired foothold in this
