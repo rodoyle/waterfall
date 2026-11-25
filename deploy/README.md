@@ -50,6 +50,16 @@ kubectl -n build logs job/kaniko-build-waterfall -f
 #    in one reproducible path (six objects):
 kubectl apply -k deploy/kustomize/overlays/default
 
+# 3. If step 1 published a NEW digest under the same :latest tag, step 2 alone
+#    does NOT pull it. The overlay pins newTag: latest, so the pod template
+#    string is unchanged and the apply reports "unchanged" without recreating
+#    the pod. Force the pull explicitly:
+kubectl -n default rollout restart deploy/orbweaver-consumer
+kubectl -n default rollout status deploy/orbweaver-consumer
+
+# Confirm the pod actually got the digest you intended:
+kubectl -n default get pod -l app=orbweaver-consumer \
+  -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
 # Optional: re-assert only the legacy Service, without touching the canonical
 # objects (a no-op against the live cluster):
 kubectl apply -k deploy/kustomize/compat
@@ -109,9 +119,17 @@ namespace. Two consequences are load-bearing in `kustomize/base/consumer.yaml`:
   a RollingUpdate cannot bind 4820 on a node that the old pod still holds.
 
 The join interface comes from `status.hostIP`, which is the node's LAN address
-on this cluster (every node is single-homed on `192.168.0.0/24`: med-laptop-2 =
-`.48`, med-laptop-1 = `.20`, sigproc's node rpi-four-2 = `.55`). Reading it from
-the API keeps the join correct if the pod moves between amd64 nodes.
+on this cluster (med-laptop-2 = `.48`, med-laptop-1 = `.20`, sigproc's node
+rpi-four-2 = `.55`). Reading it from the API keeps the join correct if the pod
+moves between amd64 nodes.
+
+Do not assume a node is single-homed. `status.hostIP` is the address the kubelet
+advertises, not necessarily the only interface on `192.168.0.0/24`. A node with
+two interfaces in the same subnet (Wi-Fi and Ethernet is the usual case) receives
+the group on both, and because the socket is bound to `0.0.0.0` while
+`IP_ADD_MEMBERSHIP` only selects which interface sends the join, both copies are
+delivered — identical 5-tuple, so they look like a double send. Check with
+`ip -4 addr` and `ip maddr show` on the node before blaming the sender.
 
 A failed join is never fatal: the consumer logs the error, reports it as
 `multicast_join_error` in `/stats`, and keeps serving unicast. While both paths
@@ -120,7 +138,8 @@ as `duplicates_dropped` (a duplicate is not reordering, so `out_of_order` and
 `gaps` are never inflated by it).
 
 Proof that the group is live — with both paths running, the expected signature
-is `duplicates_dropped ≈ packets_received / 2`:
+is `duplicates_dropped ≈ packets_received × (copies − 1) / copies`, so two copies
+drop half and three copies drop two thirds:
 
 ```bash
 # The runtime image has neither curl nor wget, so an in-pod GET is impossible.
@@ -128,7 +147,7 @@ is `duplicates_dropped ≈ packets_received / 2`:
 kubectl -n default port-forward deploy/orbweaver-consumer 4830:4830 &
 curl -s http://127.0.0.1:4830/stats
 # look for: multicast_joined=true, multicast_join_error=null,
-#           duplicates_dropped climbing at about half of packets_received
+#           duplicates_dropped climbing (see the ratio note below)
 ```
 
 Because the pod runs `hostNetwork`, the same port is also reachable directly on
@@ -143,9 +162,16 @@ and `duplicate_mismatch` stays at 0.
 Note that duplicates themselves never inflate `gaps` or `out_of_order` — the
 second copy is dropped before analysis. A rising `gaps` means real loss, and on
 the first hostNetwork rollout it did rise (`75` → `174` over 39 s) while
-`rcvbuf_bytes` read `425984` against a requested 8 MB. A capped receive buffer
-on a socket now carrying both paths is the first thing to suspect; that is a
-node sysctl, not a manifest change.
+Note that duplicates themselves never inflate `gaps` or `out_of_order` — the
+second copy is dropped before analysis. A rising `gaps` therefore means real loss
+on unique packets. But the loss is usually *caused by* the extra copies: three
+copies fill a 425,984-byte receive buffer three times faster than one path would,
+and the buffer is what overflows. Treat rising `gaps` as a symptom of the
+duplicate path, not an independent sysctl problem — removing the extra delivery
+removes the loss, and raising `net.core.rmem_max` would only mask it. The first
+hostNetwork rollout showed exactly this shape: `gaps` rose `75` → `174` over 39 s
+while `rcvbuf_bytes` read `425984` against a requested 8 MB, on a socket carrying
+three copies per datagram.
 
 ### Reading the duplicate counters
 
@@ -162,6 +188,16 @@ say whether those copies were actually verified, and where they came from:
 unicast and one multicast path there should be two addresses. Three or more means
 something else is also forwarding a copy, and that is the case to investigate
 before retiring unicast.
+
+Address count alone is not enough — the address is the *sender*, so two copies
+from the same sender share one address and still count as two. Compare
+`packets_received` against `packets_analyzed`: a ratio of 2.0 means two copies
+per datagram, 3.0 means three. The first live rollout measured 3.007 with only
+two source addresses, both the sender's, at a 2:1 split — one copy on the
+unicast source port and two on the multicast source port. A receiver cannot tell
+two wire copies from one send arriving twice when the 5-tuple is identical, so
+the split is the evidence and the mechanism needs a capture on the sender or a
+check of the receiving node's interfaces.
 
 A duplicate is compared against the retained copy of the *same* counter, not
 against whichever datagram arrived last. Interleaved arrival (`A, B, A'`) is the
