@@ -57,9 +57,17 @@ dual-homed sender is the sole trigger.
    L2: an AP in WDS/repeater mode, a mesh node with both backhauls live, or an
    extender with an Ethernet port. IGMP snooping and a querier should be present.
 3. Identify the device by name, model and port.
-4. **Gate:** either the duplicate is gone after a change on that device (then the
-   migration may be unnecessary — reassess), or the device is named and the
-   dual-homed sender is confirmed as the sole trigger (then proceed to Phase 1).
+4. **Gate (owner: infra):** the copier is identified by name, model and port, AND
+   one of these is true:
+   - **(a)** a change on that device makes `copies_per_packet` 1.0 at the wired
+     receiver — then the duplicate is fixed at the device and Phases 1-3 are
+     reassessed, possibly cancelled; or
+   - **(b)** the device is proven NOT to be the sole trigger — then Phase 1
+     proceeds.
+
+   Both are measurable with `scripts/diag/mcast_duplicate_timing.py` and
+   `scripts/diag/mcast_frame_identity.py`, already committed in `infra`.
+   `copies_per_packet == 1.0` is the pass condition; nothing else counts.
 
 
 ## Phase 1 — Cilium multicast
@@ -80,14 +88,28 @@ adding gateway complexity.
    until the overlay is proven byte-identical on the same stream. Removing
    `hostNetwork` from the capture pod and the backend is a separate, later step
    gated on that proof.
-6. **Gate:** the waterfall backend receives VITA49.2 data and context packets from
-   the capture pod over the Cilium overlay; measure Pi egress bandwidth as
-   subscribers are registered.
+6. **Per-node multicast state must be a DaemonSet from Git, not a `cilium` CLI run
+   (infra owns this, and it is a precondition for the cutover, not a follow-up).**
+   Group membership is imperative and per-node with no CRD to pin. On this cluster
+   that is not hypothetical: `rpi-four-2` went NotReady three times in one night,
+   so a node reboot silently loses membership and no Git pin notices. Build a
+   DaemonSet (or a boot Job) that reconciles the group and subscribers from a
+   committed manifest, and prove it re-applies after a node restart.
+7. **Gate:** the waterfall backend receives VITA49.2 data and context packets from
+   the capture pod over the Cilium overlay; the DaemonSet has survived a node
+   restart with membership intact; measure Pi egress bandwidth as subscribers are
+   registered.
 
 ## Phase 2 — Multus and gateway
 
 Deploy a dual-homed gateway bridging overlay multicast to the physical LAN and
 proxying VITA49.2 control traffic.
+
+> **Named exception — the gateway is dual-homed BY DESIGN.** It carries a Multus
+> LAN attachment plus Cilium for the overlay. That is deliberate and correct.
+> The accidental dual-home on `rpi-four-2` (eth0 `.55` and wlan0 `.54` on the same
+> subnet) is what we are removing. Do not "fix" the gateway's dual-home later; it
+> is the mechanism, not the defect.
 
 1. Install Multus; add a `NetworkAttachmentDefinition` (macvlan or bridge) on the
    physical LAN NIC.
@@ -98,7 +120,12 @@ proxying VITA49.2 control traffic.
    kernel multicast forwarding. Join `<OVERLAY_GROUP>`, forward VRT unchanged to
    `<LAN_GROUP>`.
 5. Control plane LAN→cluster: dedicated unicast UDP listener; forward commands to
-   the capture pod's ClusterIP.
+   the capture pod's ClusterIP. **Security constraint:** the capture service's
+   `POST /config` has no authentication today (recorded as a known limitation in
+   sigproc's `docs/plans/sweep-controller.md`, whose non-goal is "no
+   unauthenticated mutation endpoint"). The gateway must not widen that exposure
+   or become a second unauthenticated mutation path. Authenticate at the gateway,
+   or keep the control plane read-only until capture authenticates.
 6. Single-controller lease: one writer for frequency mutation, everyone else
    receive-only.
 7. CubicSDR device string:
@@ -168,14 +195,28 @@ proxying VITA49.2 control traffic.
 
 ## Still open
 
-- **Who signs off Phase 0's gate** if the named device turns out to be the sole
-  cause — infra or the human? A "duplicate fixed at the device" outcome may make
-  Phases 1-3 unnecessary, and that decision needs an owner.
-- **Does the gateway live in sigproc or as its own repo?** Decided as "a sigproc
-  service", but its VITA49 knowledge overlaps this repo's parser.
-- **How is per-node multicast state made reproducible?** `cilium multicast add` is
-  imperative and per-node. A DaemonSet or Job that re-applies it on boot is the
-  obvious answer, but nothing owns it yet.
+- **Phase 0 sign-off is infra plus the human.** Sigproc declined to sign its own
+  prerequisite. If the named device turns out to be the sole cause, "duplicate
+  fixed at the device" may make Phases 1-3 unnecessary — that decision needs the
+  human, not a session.
+- **Gateway placement is deferred to Phase 2 scheduling.** Sigproc will take the
+  recommendation when Phase 2 is actually scheduled; deciding it now would be
+  guessing at a design not yet reached. Sigproc would rather reuse this repo's
+  VITA49 framing (`src/consumer.rs`, `src/vita49.rs`) than duplicate it.
+- **Per-node multicast reproducibility is owned by infra** (offered and accepted),
+  and must be built as a DaemonSet reconciled from Git, not a `cilium` CLI run.
+  This is a precondition for the Phase 1 cutover, not a follow-up.
+
+### Measurement precondition for sigproc's runbook
+
+Sigproc's proof method reads per-source counter deltas across two `/stats`
+samples, and its premise is that the multicast socket port and membership survive
+a collector restart. With Cilium's per-node imperative membership, that premise is
+false unless a re-apply runs first. When Phase 1 lands, infra must put the
+re-apply step in the runbook and tell sigproc, who will add it to the
+preconditions table in sigproc's `docs/plans/unicast-retirement.md`. Any
+measurement taken after a pod restart without the re-apply is measuring something
+unverified.
 
 ## Not yet known
 
