@@ -209,7 +209,7 @@ say whether those copies were actually verified, and where they came from:
 | --- | --- |
 | `duplicates_compared` | Dropped copies whose bytes were compared against the retained original. |
 | `duplicates_fallback` | Dropped copies whose original had already aged out of the retained window, so only the counter matched. |
-| `sources` | Datagram count per sender address, highest first. |
+| `sources` | Datagram count per sender address, highest first. Cumulative lifetime counters, not a per-window view — see the note below. |
 
 `sources` is the field that diagnoses a duplicate rate above ~50%: with one
 unicast and one multicast path there should be two addresses. Three or more means
@@ -224,7 +224,16 @@ two source addresses, both the sender's, at a 2:1 split — one copy on the
 unicast source port and two on the multicast source port. A receiver cannot tell
 two wire copies from one send arriving twice when the 5-tuple is identical, so
 the split is the evidence and the mechanism needs a capture on the sender or a
-check of the receiving node's interfaces.
+check on the receiving node's interfaces.
+
+`sources` is cumulative for the process lifetime, so it does not answer "how many
+paths are feeding me *now*". The sender's source port changes whenever the
+collector restarts, and the old port's counter keeps its total — so after a
+restart the list shows the dead port AND the live one, and the count grows by one
+per restart. Do not read four entries as four senders. The stable rule is "the
+port that also appears at a third host is the multicast one", not a fixed port
+number. Compare deltas between two samples to see the live paths; the absolute
+values are lifetime totals.
 
 A duplicate is compared against the retained copy of the *same* counter, not
 against whichever datagram arrived last. Interleaved arrival (`A, B, A'`) is the
