@@ -20,9 +20,9 @@
 # Actions are pinned to commit SHAs so a repointed tag cannot inject code; the
 # versions those SHAs correspond to are recorded here because the SHA lines
 # themselves have no room for a trailing comment at this indentation:
-#   actions/checkout            v4
-#   docker/login-action         v3
-#   docker/build-push-action    v6
+#   actions/checkout            v7
+#   docker/login-action         v4
+#   docker/build-push-action    v7
 name: Image
 
 on:
@@ -52,7 +52,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           # The build needs no git credentials once checked out.
           persist-credentials: false
@@ -71,7 +71,7 @@ jobs:
           docker buildx inspect --bootstrap
 
       - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -96,7 +96,7 @@ jobs:
           cargo test --locked
 
       - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         with:
           context: .
           file: deploy/Dockerfile
