@@ -87,7 +87,12 @@ forever; it retries only while unresolved. It cached `10.43.78.205`. So:
   `app: waterfall-consumer` **precisely so this Service keeps selecting them**.
   Do not remove that label while the legacy Service exists.
 
-### Retirement checklist (when sigproc's owner migrates the ConfigMap)
+### Service rename checklist (keeps unicast — this is NOT unicast retirement)
+
+This checklist migrates sigproc's destination from the legacy `waterfall-service`
+to the canonical `orbweaver-service`. **The unicast path stays in place
+throughout.** Do not confuse it with retiring unicast, which is a separate and
+currently blocked decision — see "Unicast retirement" below.
 
 1. Ask the sigproc owner to set `vita49_dest_host = "orbweaver-service.default.svc.cluster.local"`
    and roll the Deployment (a brief RF gap; their call).
@@ -99,6 +104,26 @@ forever; it retries only while unresolved. It cached `10.43.78.205`. So:
 4. Drop the `app: waterfall-consumer` label from `kustomize/base/consumer.yaml`
    and re-apply the overlay.
 5. Delete `kustomize/compat/` from the repo.
+
+### Unicast retirement
+
+Retiring the unicast copy is owned by sigproc's repository, not this one. The
+procedure, the criteria and their current pass/fail state live in
+`sigproc`'s `docs/plans/unicast-retirement.md`. Read that document before
+proposing anything here.
+
+It is **not ready**, and the reason is not in this repo. Criterion 4 —
+"multicast costs exactly one copy per datagram" — is FAILING: the multicast
+sender emits two copies per datagram, so the additive path costs two datagrams
+on the wire for every one the unicast path carries. The consumer absorbs this
+correctly (`duplicate_mismatch` stays 0), but "byte-identical multicast proven"
+is not the same claim as "multicast proven", and retirement needs the second.
+What closes it is the sender-side bridge/echo check named in that document, not
+a change here.
+
+Do not add a retirement step to this file until that document reports criterion 4
+passing. The unicast bind remains the rollback path and nothing in this stack
+depends on multicast working.
 
 ## The multicast copy (additive)
 
