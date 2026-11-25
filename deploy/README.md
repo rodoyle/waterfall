@@ -117,22 +117,35 @@ A failed join is never fatal: the consumer logs the error, reports it as
 `multicast_join_error` in `/stats`, and keeps serving unicast. While both paths
 deliver, the second copy of each datagram is dropped before analysis and counted
 as `duplicates_dropped` (a duplicate is not reordering, so `out_of_order` and
-`gaps` stay at 0).
+`gaps` are never inflated by it).
 
 Proof that the group is live — with both paths running, the expected signature
 is `duplicates_dropped ≈ packets_received / 2`:
 
 ```bash
-kubectl -n default exec deploy/orbweaver-consumer -- \
-  wget -qO- http://127.0.0.1:4830/stats
+# The runtime image has neither curl nor wget, so an in-pod GET is impossible.
+# Forward the port and read it from the workstation instead:
+kubectl -n default port-forward deploy/orbweaver-consumer 4830:4830 &
+curl -s http://127.0.0.1:4830/stats
 # look for: multicast_joined=true, multicast_join_error=null,
 #           duplicates_dropped climbing at about half of packets_received
 ```
+
+Because the pod runs `hostNetwork`, the same port is also reachable directly on
+the node's LAN address (`http://<node-ip>:4830/stats`) from any host on
+`192.168.0.0/24` — that is how the first rollout was measured.
 
 `multicast_joined=true` with `duplicates_dropped=0` means the membership exists
 but no multicast datagram is arriving — an L2/CNI/interface problem, not a
 parser problem. Retire the unicast path only after the duplicate rate is stable
 and `duplicate_mismatch` stays at 0.
+
+Note that duplicates themselves never inflate `gaps` or `out_of_order` — the
+second copy is dropped before analysis. A rising `gaps` means real loss, and on
+the first hostNetwork rollout it did rise (`75` → `174` over 39 s) while
+`rcvbuf_bytes` read `425984` against a requested 8 MB. A capped receive buffer
+on a socket now carrying both paths is the first thing to suspect; that is a
+node sysctl, not a manifest change.
 
 ## Zero-interruption apply order
 
