@@ -147,6 +147,34 @@ the first hostNetwork rollout it did rise (`75` → `174` over 39 s) while
 on a socket now carrying both paths is the first thing to suspect; that is a
 node sysctl, not a manifest change.
 
+### Reading the duplicate counters
+
+`duplicates_dropped` says how many second copies were dropped. Three more fields
+say whether those copies were actually verified, and where they came from:
+
+| Field | Meaning |
+| --- | --- |
+| `duplicates_compared` | Dropped copies whose bytes were compared against the retained original. |
+| `duplicates_fallback` | Dropped copies whose original had already aged out of the retained window, so only the counter matched. |
+| `sources` | Datagram count per sender address, highest first. |
+
+`sources` is the field that diagnoses a duplicate rate above ~50%: with one
+unicast and one multicast path there should be two addresses. Three or more means
+something else is also forwarding a copy, and that is the case to investigate
+before retiring unicast.
+
+A duplicate is compared against the retained copy of the *same* counter, not
+against whichever datagram arrived last. Interleaved arrival (`A, B, A'`) is the
+normal case on this link, so the comparison has to be by counter. When the bytes
+differ, `duplicate_mismatch` rises and the copy is dropped rather than analysed —
+that means the two paths disagree, which is worse than a dead path and should be
+treated as a failure.
+
+Context packets (Type-4 IF) are counted separately as `context_packets`,
+`context_duplicates_dropped` and `context_duplicate_mismatch`. They carry no
+samples and are never analysed, but they arrive twice on the parallel paths and
+are deduped so the accounting stays honest.
+
 ## Zero-interruption apply order
 
 The RF path must never point at a Service with no ready endpoints, so:

@@ -89,6 +89,25 @@ struct Counters {
     /// Duplicates whose payload differed from the copy already analysed — a real
     /// defect in the parallel path, counted rather than silently accepted.
     duplicate_mismatch: AtomicU64,
+    /// Duplicates whose bytes were actually compared against the retained copy.
+    /// Together with `duplicates_fallback` this says how much of the duplicate
+    /// stream is genuinely verified rather than assumed.
+    duplicates_compared: AtomicU64,
+    /// Duplicates whose original copy was evicted from the retained window, so
+    /// only the counter matched and the bytes could not be checked.
+    duplicates_fallback: AtomicU64,
+    /// Type-4 IF Context packets seen. They carry no samples, so they are not
+    /// analysed, but they are deduped and counted so the parallel path is
+    /// accounted for end to end.
+    context_packets: AtomicU64,
+    /// Context packets dropped as duplicates of one already seen.
+    context_duplicates_dropped: AtomicU64,
+    /// Context duplicates whose bytes differed from the retained copy.
+    context_duplicate_mismatch: AtomicU64,
+    /// Datagram count per source address, bounded. This is how a third delivery
+    /// path is attributed: two addresses for one stream means unicast plus
+    /// multicast, three means something else is also forwarding.
+    source_counts: Mutex<HashMap<SocketAddr, u64>>,
     /// Whether the multicast group join actually succeeded in this process.
     multicast_joined: AtomicBool,
     /// Why the join failed, if it did: `/stats` stays honest about a degraded path.
@@ -142,6 +161,13 @@ struct StatsSnapshot {
     multicast_join_error: Option<String>,
     duplicates_dropped: u64,
     duplicate_mismatch: u64,
+    duplicates_compared: u64,
+    duplicates_fallback: u64,
+    context_packets: u64,
+    context_duplicates_dropped: u64,
+    context_duplicate_mismatch: u64,
+    /// Datagram count per source address, highest first, bounded.
+    sources: Vec<SourceCount>,
 }
 
 /// Configuration resolved from flags/environment.
@@ -430,6 +456,9 @@ enum Duplicate {
     /// Second copy carrying different bytes for the same counter — a real defect
     /// in the parallel path, so it is counted rather than quietly accepted.
     Mismatch,
+    /// Duplicate whose original copy has been evicted from the retained window,
+    /// so only the counter could be checked, not the bytes.
+    Fallback,
 }
 
 /// Drops the second copy of a datagram when two transport paths deliver it.
@@ -440,31 +469,41 @@ enum Duplicate {
 /// would miss reordered copies and let the duplicate reach the STFT, which doubles
 /// that packet's contribution to the sample clock and to the loss tracker.
 struct DuplicateFilter {
-    window: usize,
+    /// Counters retained for membership. Larger than `retained_window` so a late
+    /// duplicate is still recognised even after its bytes have been evicted.
     seen: HashMap<u32, VecDeque<u64>>,
-    /// Most recent copy per stream, kept so a duplicate can be compared byte for
-    /// byte against the copy that was analysed. One datagram per stream at most.
-    retained: HashMap<u32, (u64, Vec<u8>)>,
+    window: usize,
+    /// The most recent copies per stream, kept so a duplicate can be compared
+    /// byte for byte against the copy that was analysed. Bounded to
+    /// `retained_window` entries so memory stays finite.
+    retained: HashMap<u32, VecDeque<(u64, Vec<u8>)>>,
+    retained_window: usize,
 }
 
 impl DuplicateFilter {
-    /// Long enough for two paths to swap order across many packets, still bounded:
-    /// 64 counters per stream, a handful of streams, one retained datagram each.
+    /// Slots for the membership window: long enough for two paths to swap order
+    /// across many packets, still bounded.
     const WINDOW: usize = 64;
+    /// Slots retained WITH bytes. Smaller than `WINDOW` so memory stays bounded
+    /// (one datagram per slot) while a duplicate several packets later can still
+    /// be byte-compared.
+    const RETAINED_WINDOW: usize = 16;
 
     fn new() -> Self {
         DuplicateFilter {
-            window: Self::WINDOW,
             seen: HashMap::new(),
+            window: Self::WINDOW,
             retained: HashMap::new(),
+            retained_window: Self::RETAINED_WINDOW,
         }
     }
 
-    /// Narrow the window, so a test can prove the bound is real.
+    /// Narrow both windows, so a test can prove the bounds are real.
     #[cfg(test)]
     fn with_window(window: usize) -> Self {
         DuplicateFilter {
             window: window.max(1),
+            retained_window: window.max(1),
             ..DuplicateFilter::new()
         }
     }
@@ -476,30 +515,122 @@ impl DuplicateFilter {
             .is_some_and(|window| window.contains(&counter));
 
         if already_seen {
-            return match self.retained.get(&stream_id) {
-                Some((retained_counter, bytes)) if *retained_counter == counter => {
+            // Search the retained window for the ORIGINAL copy of this counter.
+            // Comparing against "the last packet seen" is what made an interleaved
+            // duplicate (A, B, A) look Exact without ever touching its bytes.
+            return match self
+                .retained
+                .get(&stream_id)
+                .and_then(|window| window.iter().find(|(c, _)| *c == counter))
+            {
+                Some((_, bytes)) => {
                     if bytes.as_slice() == datagram {
                         Duplicate::Exact
                     } else {
                         Duplicate::Mismatch
                     }
                 }
-                // Older than the retained copy: nothing left to compare against.
-                _ => Duplicate::Exact,
+                // Counter still in `seen`, but its bytes have been evicted.
+                None => Duplicate::Fallback,
             };
         }
 
-        let window = self.seen.entry(stream_id).or_default();
-        window.push_back(counter);
-        while window.len() > self.window {
-            window.pop_front();
+        let seen_window = self.seen.entry(stream_id).or_default();
+        seen_window.push_back(counter);
+        while seen_window.len() > self.window {
+            seen_window.pop_front();
         }
-        self.retained
-            .insert(stream_id, (counter, datagram.to_vec()));
+
+        let retained_window = self.retained.entry(stream_id).or_default();
+        retained_window.push_back((counter, datagram.to_vec()));
+        while retained_window.len() > self.retained_window {
+            retained_window.pop_front();
+        }
+
         Duplicate::New
     }
 }
 
+/// Cap on distinct source addresses tracked. A spoofed flood would otherwise grow
+/// the map without bound; everything past the cap folds into one bucket.
+const MAX_SOURCES: usize = 16;
+
+/// One row of the per-source attribution table served by `/stats`.
+#[derive(Debug, Clone, Serialize)]
+struct SourceCount {
+    addr: String,
+    packets: u64,
+}
+
+/// Fold one datagram's source address into the bounded per-source counter.
+///
+/// This is the diagnosis tool for the duplicate rate: sigproc sends the unicast
+/// copy to the ClusterIP and the multicast copy to the group, so the addresses
+/// should show one of each. Three or more addresses means something else is
+/// forwarding a copy, which is what a >50% duplicate rate would indicate.
+fn record_source(stats: &Counters, src: SocketAddr) {
+    let Ok(mut map) = stats.source_counts.lock() else {
+        return;
+    };
+    if let Some(count) = map.get_mut(&src) {
+        *count += 1;
+        return;
+    }
+    if map.len() < MAX_SOURCES {
+        map.insert(src, 1);
+        return;
+    }
+    *map.entry(SocketAddr::from(([0, 0, 0, 0], 0))).or_insert(0) += 1;
+}
+
+/// Key for a Type-4 IF Context packet. The stream id and timestamp sit at the same
+/// offsets as a data packet, so the same counter formula applies; the packet just
+/// carries no samples. Returns None when the datagram is too short to key on.
+fn context_key(datagram: &[u8], sample_rate: f64) -> Option<(u32, u64)> {
+    if datagram.len() < 20 {
+        return None;
+    }
+    let stream_id = u32::from_be_bytes([datagram[4], datagram[5], datagram[6], datagram[7]]);
+    let ts_int = u32::from_be_bytes([datagram[8], datagram[9], datagram[10], datagram[11]]);
+    let ts_frac = u64::from_be_bytes([
+        datagram[12],
+        datagram[13],
+        datagram[14],
+        datagram[15],
+        datagram[16],
+        datagram[17],
+        datagram[18],
+        datagram[19],
+    ]);
+    Some((
+        stream_id,
+        (ts_int as u64)
+            .saturating_mul(sample_rate as u64)
+            .saturating_add(ts_frac),
+    ))
+}
+
+/// Snapshot of the per-source attribution table, highest count first.
+///
+/// Sorted so the dominant delivery path is first: with both paths live we expect
+/// one unicast address and one multicast address, and an unexpected third entry
+/// is what explains a duplicate rate above ~50%.
+fn source_snapshot(stats: &Counters) -> Vec<SourceCount> {
+    let mut sources: Vec<SourceCount> = match stats.source_counts.lock() {
+        Ok(map) => map
+            .iter()
+            .map(|(addr, packets)| SourceCount {
+                addr: addr.to_string(),
+                packets: *packets,
+            })
+            .collect(),
+        // A poisoned map is not worth failing a stats response over; report none
+        // rather than a fake table.
+        Err(_) => Vec::new(),
+    };
+    sources.sort_by_key(|source| std::cmp::Reverse(source.packets));
+    sources
+}
 // ---------------- Spike helpers ----------------
 
 /// Hexdump + shape assertion for the first datagrams on the wire.
@@ -620,8 +751,15 @@ async fn receive_loop(
         .load(Ordering::Relaxed)
         .then(DuplicateFilter::new);
 
+    // Context packets carry no samples, so they never reach the analysis queue,
+    // but a duplicate copy still must not be counted twice. They get their own
+    // filter so a context counter can never collide with a data counter.
+    let mut context_dedupe = stats
+        .multicast_joined
+        .load(Ordering::Relaxed)
+        .then(DuplicateFilter::new);
     loop {
-        let (n, _src) = match socket.recv_from(&mut buf).await {
+        let (n, src) = match socket.recv_from(&mut buf).await {
             Ok(v) => v,
             Err(e) => {
                 Counters::bump(&stats.socket_errors);
@@ -630,6 +768,9 @@ async fn receive_loop(
                 continue;
             }
         };
+        // Attribute this datagram to its sender. With both transport paths live this
+        // is how we tell unicast from multicast from an unexpected third copy.
+        record_source(&stats, src);
 
         let received = stats.packets_received.fetch_add(1, Ordering::Relaxed) + 1;
         let datagram = &buf[..n];
@@ -658,11 +799,21 @@ async fn receive_loop(
                         Duplicate::New => {}
                         Duplicate::Exact => {
                             Counters::bump(&stats.duplicates_dropped);
+                            Counters::bump(&stats.duplicates_compared);
                             continue;
                         }
                         Duplicate::Mismatch => {
                             Counters::bump(&stats.duplicates_dropped);
+                            Counters::bump(&stats.duplicates_compared);
                             Counters::bump(&stats.duplicate_mismatch);
+                            continue;
+                        }
+                        Duplicate::Fallback => {
+                            // The original copy aged out of the retained window, so
+                            // the bytes could not be compared. Still a duplicate, so
+                            // drop it — but count it as unverified, not as a match.
+                            Counters::bump(&stats.duplicates_dropped);
+                            Counters::bump(&stats.duplicates_fallback);
                             continue;
                         }
                     }
@@ -715,7 +866,33 @@ async fn receive_loop(
                     }
                 }
             }
-            Err(ParseError::ContextPacket) => continue,
+            Err(ParseError::ContextPacket) => {
+                // Context packets carry no samples, so they are never analysed, but
+                // they still arrive twice on the parallel paths and must be counted
+                // and deduped exactly like data packets.
+                Counters::bump(&stats.context_packets);
+                if let Some(filter) = context_dedupe.as_mut() {
+                    if let Some((stream_id, counter)) = context_key(datagram, cfg.sample_rate) {
+                        match filter.observe(stream_id, counter, datagram) {
+                            Duplicate::New => {}
+                            Duplicate::Exact => {
+                                Counters::bump(&stats.context_duplicates_dropped);
+                                Counters::bump(&stats.duplicates_compared);
+                            }
+                            Duplicate::Mismatch => {
+                                Counters::bump(&stats.context_duplicates_dropped);
+                                Counters::bump(&stats.duplicates_compared);
+                                Counters::bump(&stats.context_duplicate_mismatch);
+                            }
+                            Duplicate::Fallback => {
+                                Counters::bump(&stats.context_duplicates_dropped);
+                                Counters::bump(&stats.duplicates_fallback);
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             Err(e) => {
                 Counters::bump(&stats.parse_errors);
                 match e {
@@ -912,6 +1089,12 @@ fn snapshot(
             .and_then(|error| error.clone()),
         duplicates_dropped: stats.duplicates_dropped.load(Ordering::Relaxed),
         duplicate_mismatch: stats.duplicate_mismatch.load(Ordering::Relaxed),
+        duplicates_compared: stats.duplicates_compared.load(Ordering::Relaxed),
+        duplicates_fallback: stats.duplicates_fallback.load(Ordering::Relaxed),
+        context_packets: stats.context_packets.load(Ordering::Relaxed),
+        context_duplicates_dropped: stats.context_duplicates_dropped.load(Ordering::Relaxed),
+        context_duplicate_mismatch: stats.context_duplicate_mismatch.load(Ordering::Relaxed),
+        sources: source_snapshot(stats),
     }
 }
 
@@ -966,14 +1149,27 @@ async fn stats_loop(stats: Arc<Counters>, cfg: Arc<Config>) {
         // The parallel-path line: `duplicates_dropped` climbing at about half of rx is
         // the positive proof that multicast AND unicast are both delivering.
         println!(
-            "consumer path: multicast_group={:?} iface={:?} joined={} join_error={:?} | duplicates_dropped={} duplicate_mismatch={}",
+            "consumer path: multicast_group={:?} iface={:?} joined={} join_error={:?} | duplicates_dropped={} duplicate_mismatch={} compared={} fallback={} | context_packets={} context_duplicates_dropped={} context_duplicate_mismatch={}",
             snap.multicast_group,
             snap.multicast_iface,
             snap.multicast_joined,
             snap.multicast_join_error,
             snap.duplicates_dropped,
             snap.duplicate_mismatch,
+            snap.duplicates_compared,
+            snap.duplicates_fallback,
+            snap.context_packets,
+            snap.context_duplicates_dropped,
+            snap.context_duplicate_mismatch,
         );
+        // Per-source attribution: how many delivery paths actually feed this socket.
+        // More than unicast + multicast is what explains a duplicate rate above ~50%.
+        let sources: Vec<String> = snap
+            .sources
+            .iter()
+            .map(|source| format!("{}={}", source.addr, source.packets))
+            .collect();
+        println!("consumer sources: {}", sources.join(" | "));
     }
 }
 
@@ -1171,11 +1367,85 @@ mod tests {
         .unwrap();
         assert_eq!(stats.packets_received.load(Ordering::Relaxed), 7);
         assert_eq!(stats.packets_analyzed.load(Ordering::Relaxed), 4);
+        // Only the two well-formed context packets reach the context path; the
+        // truncated third copy fails the declared-length check first and is counted
+        // as a parse error instead.
+        assert_eq!(stats.context_packets.load(Ordering::Relaxed), 2);
         assert_eq!(stats.parse_errors.load(Ordering::Relaxed), 1);
         assert_eq!(stats.size_field_mismatch.load(Ordering::Relaxed), 0);
         assert_eq!(stats.gaps.load(Ordering::Relaxed), 1);
         assert_eq!(stats.missing_samples.load(Ordering::Relaxed), 12);
         assert_eq!(stats.sequence_gaps.load(Ordering::Relaxed), 1);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn context_packets_are_deduped_on_the_parallel_path() {
+        // Context packets carry no samples and are never analysed, but they still
+        // arrive twice when both transport paths are live. Dropping the second copy
+        // keeps the context accounting honest instead of double-counting it.
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = socket.local_addr().unwrap();
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stats = Arc::new(Counters::default());
+        stats.multicast_joined.store(true, Ordering::Relaxed);
+        let cfg = Arc::new(Config {
+            listen: target,
+            bridge_url: String::new(),
+            sample_rate: 2_000_000.0,
+            center_hz: 0.0,
+            publish_hz: 30.0,
+            stats_listen: target,
+            rcvbuf: 0,
+            hexdump_first: 0,
+            capture_fixture: None,
+            multicast: MulticastConfig::Joined {
+                group: "239.255.49.2".parse().unwrap(),
+                iface: "127.0.0.1".parse().unwrap(),
+            },
+        });
+        let (tx, _rx) = mpsc::channel(8);
+        let task = tokio::spawn(receive_loop(
+            socket,
+            tx,
+            Arc::clone(&stats),
+            cfg,
+            Arc::new(AtomicBool::new(false)),
+        ));
+
+        // One context packet, delivered twice by the two paths.
+        let mut context = vec![0u8; 60];
+        context[..4].copy_from_slice(&0x40d9_000fu32.to_be_bytes());
+        // A distinct stream id so this cannot collide with a data packet key.
+        context[4..8].copy_from_slice(&0x0000_00ffu32.to_be_bytes());
+        for _ in 0..2 {
+            sender.send_to(&context, target).await.unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while stats.context_packets.load(Ordering::Relaxed) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(stats.context_packets.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            stats.context_duplicates_dropped.load(Ordering::Relaxed),
+            1,
+            "the second context copy must be dropped, not counted twice"
+        );
+        assert_eq!(
+            stats.duplicates_compared.load(Ordering::Relaxed),
+            1,
+            "the dropped copy was byte-compared, so it counts as verified"
+        );
+        assert_eq!(
+            stats.context_duplicate_mismatch.load(Ordering::Relaxed),
+            0,
+            "identical copies must not report a mismatch"
+        );
         task.abort();
     }
 
@@ -1204,6 +1474,59 @@ mod tests {
             filter.observe(7, 1024, &altered),
             Duplicate::Mismatch,
             "same counter with different bytes must not pass as an identical copy"
+        );
+    }
+
+    #[test]
+    fn duplicate_filter_compares_interleaved_duplicates() {
+        // The regression this guards: retaining only the MOST RECENT datagram meant
+        // an interleaved duplicate (A, B, A') was compared against B, so a differing
+        // A' was reported Exact without its bytes ever being examined. Interleaving
+        // is the normal case here — the unicast and multicast copies are not adjacent.
+        let mut filter = DuplicateFilter::new();
+        let a = data(4, 1024, 8);
+        let b = data(4, 1536, 8);
+
+        assert_eq!(filter.observe(7, 1024, &a), Duplicate::New);
+        assert_eq!(filter.observe(7, 1536, &b), Duplicate::New);
+
+        // A' for the older counter, arriving after B. Must be byte-compared to A.
+        let mut a_prime = a.clone();
+        let last = a_prime.len() - 1;
+        a_prime[last] ^= 0xff;
+        assert_eq!(
+            filter.observe(7, 1024, &a_prime),
+            Duplicate::Mismatch,
+            "an interleaved duplicate with different bytes must be a mismatch"
+        );
+
+        // And a faithful copy of A still reads as Exact, not as a second mismatch.
+        assert_eq!(filter.observe(7, 1024, &a), Duplicate::Exact);
+    }
+
+    #[test]
+    fn duplicate_filter_reports_fallback_when_bytes_were_evicted() {
+        // The membership window is longer than the retained window, so a duplicate
+        // that is still "seen" can be older than the bytes we kept. That must be
+        // reported honestly as unverified rather than silently claimed as Exact.
+        let mut filter = DuplicateFilter::new();
+        let first = data(4, 0, 8);
+        assert_eq!(filter.observe(9, 0, &first), Duplicate::New);
+
+        // Push the first copy's bytes out of the retained window without leaving the
+        // membership window.
+        for i in 1..=DuplicateFilter::RETAINED_WINDOW {
+            let counter = i as u64 * 512;
+            assert_eq!(
+                filter.observe(9, counter, &data(4, counter, 8)),
+                Duplicate::New
+            );
+        }
+
+        assert_eq!(
+            filter.observe(9, 0, &first),
+            Duplicate::Fallback,
+            "a duplicate whose bytes were evicted cannot be verified"
         );
     }
 
