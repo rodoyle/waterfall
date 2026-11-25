@@ -23,16 +23,25 @@ the Rust crate, the binaries and the image stay **waterfall**
 
 | Path | Purpose |
 |---|---|
-| `kustomize/build/` | kaniko Job (amd64 builder) → pushes `ghcr.io/rodoyle/waterfall:latest` |
+| `.github/workflows/` | CI gate (`ci.yml`) and the image build (`image.yml`, GHCR on master push) |
+| `kustomize/build/` | fallback kaniko Job (amd64 builder) → same `ghcr.io/rodoyle/waterfall` repo |
 | `kustomize/base/` | canonical Deployments + Services + Ingress |
 | `kustomize/overlays/default/` | namespace, image tag — the single app deploy root (includes the compat Service) |
 | `kustomize/compat/` | the legacy `waterfall-service`, frozen; included by the overlay and applicable standalone |
-| `Dockerfile` | the image the kaniko Job builds (referenced as `deploy/Dockerfile`) |
+| `Dockerfile` | the runtime image both builders build (referenced as `deploy/Dockerfile`) |
 
 ## Deploy
 
 ```bash
 # 1. Build the image (only needed when code changes; the tag is :latest).
+#    PRIMARY: GitHub Actions builds on every push to master and publishes
+#    ghcr.io/rodoyle/waterfall:latest plus an immutable :sha-<short>
+#    (see .github/workflows/image.yml). Nothing to run locally — wait for the
+#    run to go green and note the published digest.
+#
+#    FALLBACK: the in-cluster kaniko Job builds the same image from GitHub
+#    master. Use it when Actions is unavailable, or when the image must be
+#    rebuilt without a new commit:
 kubectl delete job kaniko-build-waterfall -n build --ignore-not-found
 kubectl apply -k deploy/kustomize/build
 kubectl -n build logs job/kaniko-build-waterfall -f

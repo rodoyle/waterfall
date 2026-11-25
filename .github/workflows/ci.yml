@@ -1,0 +1,96 @@
+# Lint and test every branch and every pull request.
+#
+# This is the same gate the local Husky hook runs (.husky/pre-commit), so
+# a green local commit and a green CI run cannot disagree:
+#
+#   cargo fmt --all --check      formatting
+#   cargo clippy ... -D warnings the Rust lint gate
+#   cargo test / bun test        the Rust and JS suites
+#   biome check                  the JS lint/format gate
+#
+# Actions are pinned to commit SHAs, not moving tags, matching sigproc's
+# workflows: a tag can be repointed at new code, a SHA cannot.
+#
+# NOTE for Windows contributors: the repo stores LF, but core.autocrlf=true
+# checks files out as CRLF, and `biome check` then reports a format error on
+# every JS/TS file. That is a checkout artifact, not a real failure;
+# .gitattributes pins eol=lf for those paths so both platforms agree.
+name: CI
+
+on:
+  push:
+    branches: ["*"]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Skip Husky's hook installation: there is no git identity or commit in CI,
+  # and `bun run prepare` would otherwise try to write .git/hooks.
+  HUSKY: "0"
+
+permissions:
+  contents: read
+
+concurrency:
+  # A new push supersedes an in-flight run for the same branch.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Do not leave the workflow token in .git/config for later steps.
+          persist-credentials: false
+
+      # Rust before Bun: the clippy step is the slowest, and running it first
+      # keeps a Rust failure from paying for node_modules.
+      #
+      # Installed with rustup directly (as sigproc's rust.yml does) rather
+      # than a third-party action: one less dependency in the supply chain,
+      # and the toolchain is whatever stable is on the runner.
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component rustfmt --component clippy
+          rustup default stable
+          cargo --version
+          rustc --version
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Check formatting (cargo fmt)
+        run: cargo fmt --all --check
+
+      - name: Lint workspace (clippy, warnings are errors)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: latest
+
+      - name: Install JS dependencies
+        run: bun install --frozen-lockfile
+
+      # Biome only: fmt and clippy already ran above, so this stays the JS half
+      # of `bun run check` and a failure is attributed to the right tool.
+      - name: Lint and format check (biome)
+        run: bunx biome check --error-on-warnings .
+
+      - name: Typecheck (tsc)
+        run: bun run typecheck
+
+      - name: Run JS tests
+        run: bun test

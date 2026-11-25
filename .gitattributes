@@ -1,2 +1,15 @@
 # Captured wire-format fixtures are binary: never apply end-of-line conversion.
 *.bin binary
+
+# Biome's formatter writes LF and `biome check` compares byte-for-byte. On a
+# Windows checkout with core.autocrlf=true the working copy is CRLF, so every
+# JS/TS/JSON file reports a format error that Linux CI never sees — the gate
+# then means two different things depending on the platform. Pin LF for exactly
+# the paths biome checks so `bun run check` is identical everywhere.
+*.js    text eol=lf
+*.jsx   text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.mjs   text eol=lf
+*.cjs   text eol=lf
+*.json  text eol=lf

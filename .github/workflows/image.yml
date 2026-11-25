@@ -1,0 +1,119 @@
+# Build the runtime image and publish it to GHCR on every master push.
+#
+# Unlike sigproc (arm64, so its images are built by a kaniko Job inside the k3s
+# cluster), waterfall's image is linux/amd64 — the same architecture as
+# GitHub's ubuntu-latest runners. So this builds natively with Docker here: no
+# KUBECONFIG secret, no cluster RBAC, no kaniko scratch PVC. That also makes it
+# the path that keeps working when the in-cluster builder cannot run.
+#
+# The Deployments pull `ghcr.io/rodoyle/waterfall:latest` with
+# imagePullPolicy: Always, so publishing :latest is the image half of a deploy;
+# the manifest half is still `kubectl apply -k` by the operator.
+#
+# Tags published per push:
+#   :latest         what deploy/kustomize/base/*.yaml pulls
+#   :sha-<short>    immutable, so a rollout can be pinned or rolled back exactly
+#
+# `deploy/kustomize/build/kaniko-job.yaml` remains the fallback builder for the
+# same image; both push to the same repository, so they are interchangeable.
+#
+# Actions are pinned to commit SHAs so a repointed tag cannot inject code; the
+# versions those SHAs correspond to are recorded here because the SHA lines
+# themselves have no room for a trailing comment at this indentation:
+#   actions/checkout            v4
+#   docker/login-action         v3
+#   docker/build-push-action    v6
+name: Image
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+env:
+  # Must stay lowercase and must match the `image:` fields in
+  # deploy/kustomize/base/{consumer,bridge}.yaml.
+  IMAGE: ghcr.io/rodoyle/waterfall
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  # Never let two builds race to publish :latest — the loser could finish last
+  # and leave the tag pointing at older code.
+  group: image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build and push
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # The build needs no git credentials once checked out.
+          persist-credentials: false
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short=${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      # The container driver is what makes `cache-to: type=registry` work; the
+      # default docker driver cannot export a layer cache to a registry. Created
+      # with the CLI rather than docker/setup-buildx-action: one fewer pinned
+      # dependency, and buildx ships on the runner already.
+      - name: Set up Buildx (container driver)
+        run: |
+          docker buildx create --use --name ci --driver=docker-container
+          docker buildx inspect --bootstrap
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # This workflow publishes on its own trigger and has no cross-workflow
+      # dependency on CI, so it re-runs the gate itself: a red master must never
+      # publish an image that cannot pass its own tests. Installing Rust with
+      # rustup directly (as sigproc's rust.yml does) keeps one fewer action in
+      # the supply chain.
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal \
+            --component rustfmt --component clippy
+          rustup default stable
+          cargo --version
+
+      - name: Gate — formatting, lint, tests
+        run: |
+          cargo fmt --all --check
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo test --locked
+
+      - name: Build and push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: deploy/Dockerfile
+          # amd64 only, deliberately not multi-arch: the cluster nodes are amd64
+          # and building arm64 would need QEMU, which this path avoids.
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:sha-${{ steps.sha.outputs.short }}
+          # Provenance off keeps :latest a plain single-platform manifest. The
+          # k3s nodes would handle an attestation index, but a plain manifest is
+          # one less thing between a push and a running pod.
+          provenance: false
+          # Layer cache lives in the registry, not the shared Actions cache:
+          # the :buildcache tag is writable only by this workflow's token, so
+          # a build here cannot be poisoned by an unrelated run the way a
+          # shared GHA cache can. Deployments never reference this tag.
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
